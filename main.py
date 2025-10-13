@@ -20,7 +20,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-CATALOG_URL = "https://www.beeminternational.com.tr/urun"
+CATALOG_URL = "https://www.beeminternational.com.tr/urun/"
 
 # Admin kullanıcı adları: /fiyat_guncelle sadece bunlarda çalışır
 ADMIN_USERNAMES = set(u.strip().lower() for u in os.getenv(
