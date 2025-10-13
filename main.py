@@ -164,44 +164,93 @@ HEADERS = {
 }
 
 def scrape_catalog() -> List[Tuple[str, str, Optional[str]]]:
-    """ /urun sayfasından tüm ürünleri ve fiyatlarını çeker. """
-    resp = requests.get(CATALOG_URL, headers=HEADERS, timeout=30)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+    """ Ürün listesini /urun/ sayfasından linkleriyle al, fiyatı tekil ürün sayfasından çek. """
+    # 1) Liste sayfasını al
+    try:
+        r = requests.get(CATALOG_URL, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+    except Exception:
+        return []
 
-    items: List[Tuple[str, str, Optional[str]]] = []
-    for card in soup.select("article, .product, .product-card, li, .item, .product-item, .col"):
-        text = " ".join(card.get_text(" ", strip=True).split())
-        if not text:
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    # 2) Ürün linklerini & görünen isimleri topla
+    product_links: Dict[str, str] = {}  # normalized_name -> absolute href
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        txt = a.get_text(" ", strip=True)
+        if not txt or not href:
             continue
-        a = card.find("a")
-        name, href = None, None
-        if a and a.get_text(strip=True):
-            name = a.get_text(" ", strip=True)
-            href = a.get("href")
-            if href and href.startswith("/"):
-                href = "https://www.beeminternational.com.tr" + href
-        if not name:
-            h = card.find(["h2", "h3"])
-            if h and h.get_text(strip=True):
-                name = h.get_text(" ", strip=True)
-        price = None
-        m = re.search(r"([\d\.\,]+\s*(?:TL|₺))", text, flags=re.I)
-        if m:
-            price = format_price_try(m.group(1))
-        if name and price:
-            items.append((name, price, href))
+        # Ürün sayfaları genelde /urun/... içerir; kategori dışındaki menü linklerini ele.
+        if "/urun/" not in href:
+            continue
+        # mutlaklaştır
+        if href.startswith("/"):
+            href = "https://www.beeminternational.com.tr" + href
+        # isim olarak görünen metin
+        name = txt
+        # normalize edip sözlüğe koy
+        key = tr_norm(name) or tr_norm(href.rsplit("/", 1)[-1])
+        if key and key not in product_links:
+            product_links[key] = href
 
-    # yinelenenleri sil
+    if not product_links:
+        return []
+
+    # 3) Her ürün sayfasına girip isim + fiyat çıkar
+    results: List[Tuple[str, str, Optional[str]]] = []
+    for key, href in list(product_links.items()):
+        try:
+            pr = requests.get(href, headers=HEADERS, timeout=30)
+            pr.raise_for_status()
+        except Exception:
+            continue
+
+        psoup = BeautifulSoup(pr.text, "html.parser")
+        page_text = " ".join(psoup.get_text(" ", strip=True).split())
+
+        # İsim adayı: sayfadaki h1/h2 başlıklar
+        name_el = psoup.find(["h1", "h2"])
+        name = (name_el.get_text(" ", strip=True) if name_el else None) or key
+
+        # Fiyat: WooCommerce sınıfları + serbest regex
+        price_text = None
+
+        # Sık görülen sınıflar
+        cand = psoup.select(".price, .woocommerce-Price-amount, .product-price, .summary .price")
+        for c in cand:
+            t = c.get_text(" ", strip=True)
+            if re.search(r"[\d\.\,]+\s*(TL|₺)", t, flags=re.I):
+                price_text = t
+                break
+
+        # Yedek: sayfa metninden regex
+        if not price_text:
+            m = re.search(r"([\d\.\,]+\s*(?:TL|₺))", page_text, flags=re.I)
+            if m:
+                price_text = m.group(1)
+
+        if not price_text:
+            # fiyat çıkmadıysa atla (ürün olmayabilir)
+            continue
+
+        results.append((name, format_price_try(price_text), href))
+
+        # Nazik ol: çok hızlı istek atma
+        time.sleep(0.2)
+
+    # Yinelenenleri normalize ederek temizle
     seen = set()
     uniq: List[Tuple[str, str, Optional[str]]] = []
-    for n, p, h in items:
-        key = tr_norm(n)
-        if key in seen:
+    for n, p, h in results:
+        k = tr_norm(n)
+        if k in seen:
             continue
-        seen.add(key)
+        seen.add(k)
         uniq.append((n, p, h))
+
     return uniq
+
 
 def scrape_product_details(url: str) -> str:
     """ Tekil ürün sayfasından içerik/kullanım özetini çıkarır. """
