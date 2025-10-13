@@ -164,7 +164,9 @@ HEADERS = {
 }
 
 def scrape_catalog() -> List[Tuple[str, str, Optional[str]]]:
-    """ Ürün listesini /urun/ sayfasından linkleriyle al, fiyatı tekil ürün sayfasından çek. """
+    """ Ürün listesini /urun/ sayfasından linkleriyle alır; fiyatı tekil ürün sayfalarından çıkarır.
+        Fiyat bulmada: sayfadaki tüm para adaylarını toplayıp (TL/₺ olsa da olmasa da),
+        0 ve çok küçük değerleri eleyip en büyük mantıklı değeri fiyat kabul eder. """
     # 1) Liste sayfasını al
     try:
         r = requests.get(CATALOG_URL, headers=HEADERS, timeout=30)
@@ -175,21 +177,17 @@ def scrape_catalog() -> List[Tuple[str, str, Optional[str]]]:
     soup = BeautifulSoup(r.text, "html.parser")
 
     # 2) Ürün linklerini & görünen isimleri topla
-    product_links: Dict[str, str] = {}  # normalized_name -> absolute href
+    product_links: Dict[str, str] = {}
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         txt = a.get_text(" ", strip=True)
         if not txt or not href:
             continue
-        # Ürün sayfaları genelde /urun/... içerir; kategori dışındaki menü linklerini ele.
         if "/urun/" not in href:
             continue
-        # mutlaklaştır
         if href.startswith("/"):
             href = "https://www.beeminternational.com.tr" + href
-        # isim olarak görünen metin
         name = txt
-        # normalize edip sözlüğe koy
         key = tr_norm(name) or tr_norm(href.rsplit("/", 1)[-1])
         if key and key not in product_links:
             product_links[key] = href
@@ -199,6 +197,8 @@ def scrape_catalog() -> List[Tuple[str, str, Optional[str]]]:
 
     # 3) Her ürün sayfasına girip isim + fiyat çıkar
     results: List[Tuple[str, str, Optional[str]]] = []
+    money_pat = re.compile(r"\b(\d{1,3}(?:[\.\s]\d{3})*(?:[\,\.]\d{2})|\d+)\b")  # 984,50 | 1.234,00 | 999
+
     for key, href in list(product_links.items()):
         try:
             pr = requests.get(href, headers=HEADERS, timeout=30)
@@ -209,35 +209,51 @@ def scrape_catalog() -> List[Tuple[str, str, Optional[str]]]:
         psoup = BeautifulSoup(pr.text, "html.parser")
         page_text = " ".join(psoup.get_text(" ", strip=True).split())
 
-        # İsim adayı: sayfadaki h1/h2 başlıklar
+        # İsim adayı: h1/h2 başlıklar öncelik
         name_el = psoup.find(["h1", "h2"])
         name = (name_el.get_text(" ", strip=True) if name_el else None) or key
 
-        # Fiyat: WooCommerce sınıfları + serbest regex
-        price_text = None
+        # 3a) Önce yaygın fiyat alanlarından metinleri topla
+        texts: List[str] = []
+        for sel in [".price", ".woocommerce-Price-amount", ".product-price", ".summary .price"]:
+            for el in psoup.select(sel):
+                t = el.get_text(" ", strip=True)
+                if t:
+                    texts.append(t)
 
-        # Sık görülen sınıflar
-        cand = psoup.select(".price, .woocommerce-Price-amount, .product-price, .summary .price")
-        for c in cand:
-            t = c.get_text(" ", strip=True)
-            if re.search(r"[\d\.\,]+\s*(TL|₺)", t, flags=re.I):
-                price_text = t
-                break
+        # 3b) Yedek: tüm sayfa metninden de aday topla
+        texts.append(page_text)
 
-        # Yedek: sayfa metninden regex
-        if not price_text:
-            m = re.search(r"([\d\.\,]+\s*(?:TL|₺))", page_text, flags=re.I)
-            if m:
-                price_text = m.group(1)
+        # 3c) Metinlerdeki sayısal para adaylarını topla ve normalize et (TR → float)
+        candidates: List[float] = []
+        for t in texts:
+            for m in money_pat.finditer(t):
+                raw = m.group(1)
+                # normalize: 1.234,56 → 1234.56  |  999 → 999.00
+                x = raw.replace(".", "").replace(" ", "").replace(",", ".")
+                try:
+                    val = float(x)
+                    candidates.append(val)
+                except:
+                    continue
 
-        if not price_text:
-            # fiyat çıkmadıysa atla (ürün olmayabilir)
+        # 3d) Adayları filtrele: 0 ve çok küçükleri at (ör. sepet 0,00)
+        # (10 TL altını çöplük kabul ediyoruz; istersen bu eşiği 5 yapabiliriz)
+        candidates = [v for v in candidates if v >= 10]
+
+        if not candidates:
+            # Fiyat çıkarılamadıysa bu ürünü atla
             continue
 
-        results.append((name, format_price_try(price_text), href))
+        # 3e) En büyük mantıklı değeri fiyat kabul et
+        best = max(candidates)
 
-        # Nazik ol: çok hızlı istek atma
-        time.sleep(0.2)
+        # 3f) TL biçiminde yaz
+        price_fmt = f"{best:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") + " TL"
+
+        results.append((name, price_fmt, href))
+
+        time.sleep(0.2)  # nazik gecikme
 
     # Yinelenenleri normalize ederek temizle
     seen = set()
@@ -250,7 +266,6 @@ def scrape_catalog() -> List[Tuple[str, str, Optional[str]]]:
         uniq.append((n, p, h))
 
     return uniq
-
 
 def scrape_product_details(url: str) -> str:
     """ Tekil ürün sayfasından içerik/kullanım özetini çıkarır. """
