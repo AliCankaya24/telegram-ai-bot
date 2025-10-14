@@ -1,36 +1,40 @@
-# main.py — Bee’M AI Asistan (final)
+# main.py — Bee’M AI Asistan (Excel fiyatlı final)
 # Özellikler:
 # - /start, /menu: Kişiye isimle hoş geldin + butonlu menü
-# - /fiyat <ürün>: Ad + fiyat + lider yönlendirme
-# - /fiyat_guncelle: Ürün/fiyat listesini siteden yeniler (GİZLİ — sadece admin)
-# - /fiyat_durum: Son güncelleme ve ürün sayısı
-# - /icerik <ürün>: Tekil ürün sayfasından içerik/kullanım özeti
-# - “sen kimsin?” gibi doğal sorulara mix tanıtım cevabı
-# - /kargo, /indirim, /destek: Kısa yardımcı akışlar
+# - /fiyat <ürün>: Excel'den "Ad — Fiyat" + lider yönlendirme
+# - /fiyat_guncelle: Excel'i URL'den tekrar okur (GİZLİ — sadece admin)
+# - /fiyat_durum: Son yükleme ve ürün sayısı
+# - /icerik <ürün>: Ürünün detay linkinden içerik/kullanım özeti (Excel'de "url" doluysa onu, yoksa /urun/ sayfasından bulmaya çalışır)
+# - “sen kimsin?” → mix tanıtım
+# - /kargo, /indirim, /destek: kısa akışlar
 #
-# Env: TELEGRAM_BOT_TOKEN, GROQ_API_KEY
+# Env: TELEGRAM_BOT_TOKEN, GROQ_API_KEY, PRICE_SHEET_URL
+# Opsiyonel: ADMIN_USERNAMES (virgüllü liste; varsayılan: ali_cankaya, deryakaratasates)
 # Not: Kişisel veri/log tutulmaz.
 
-import os, time, re, difflib, requests
+import os, time, re, difflib, io, requests
 from typing import Dict, Tuple, Optional, List
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request
+import pandas as pd
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+PRICE_SHEET_URL = os.getenv("PRICE_SHEET_URL", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-CATALOG_URL = "https://www.beeminternational.com.tr/urun/"
-
-# Admin kullanıcı adları: /fiyat_guncelle sadece bunlarda çalışır
+# Admin kullanıcı adları (küçük harf, @ yok)
 ADMIN_USERNAMES = set(u.strip().lower() for u in os.getenv(
     "ADMIN_USERNAMES",
     "ali_cankaya, deryakaratasates"
 ).split(","))
 
+# Ürün linklerini bulmak için fallback sayfası
+CATALOG_URL = "https://www.beeminternational.com.tr/urun/"
+
 app = FastAPI()
 
-# ----------------- Yardımcılar -----------------
+# -------------- Yardımcılar --------------
 def send_message(chat_id: int, text: str, reply_markup: dict | None = None):
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_markup:
@@ -88,7 +92,7 @@ def set_bot_commands():
         {"command": "start", "description": "Başlat ve menüyü göster"},
         {"command": "menu", "description": "Menüyü tekrar göster"},
         {"command": "fiyat", "description": "Fiyat sorgula: /fiyat <ürün>"},
-        # /fiyat_guncelle gizli: listeye BİLEREK eklenmiyor
+        # /fiyat_guncelle gizli: listeye eklemiyoruz
         {"command": "fiyat_durum", "description": "Fiyat listesi bilgisi"},
         {"command": "icerik", "description": "Ürün içeriği: /icerik <ürün>"},
         {"command": "kargo", "description": "Kargo & teslimat bilgisi"},
@@ -103,45 +107,84 @@ def set_bot_commands():
 
 def tr_norm(s: str) -> str:
     s = s.lower().strip()
-    table = str.maketrans("çğıöşüâêîû", "cgiosuaeiu")
+    table = str.maketrans("çğıöşüâêîû’'", "cgiosuaeiu  ")
     s = s.translate(table)
     s = re.sub(r"[^a-z0-9]+", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
-def format_price_try(raw: str) -> str:
-    nums = re.sub(r"[^\d,\.]", "", raw)
-    nums = nums.replace(".", "").replace(",", ".")
-    try:
-        val = float(nums)
-        return f"{val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") + " TL"
-    except:
-        return raw.strip()
+def format_price_try(val) -> str:
+    # val sayı ise: 984.5 → "984,50 TL"; metinse parse etmeye çalış
+    if isinstance(val, (int, float)):
+        num = float(val)
+    else:
+        raw = str(val).strip()
+        raw = raw.replace(".", "").replace(",", ".")
+        try:
+            num = float(raw)
+        except:
+            return str(val)
+    return f"{num:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") + " TL"
 
-# ----------------- Katalog (bellek içi) -----------------
-class ProductCatalog:
+# -------------- Katalog (Excel'den) --------------
+class ExcelCatalog:
     def __init__(self):
+        # name_map: orijinal_ad -> (fiyat_fmt, url)
         self.name_map: Dict[str, Tuple[str, Optional[str]]] = {}
+        # search_index: normalize -> orijinal_ad
         self.search_index: Dict[str, str] = {}
         self.updated_ts: Optional[int] = None
+        self.source_info: str = "Henüz yüklenmedi"
 
     def clear(self):
         self.name_map.clear()
         self.search_index.clear()
         self.updated_ts = None
+        self.source_info = "Henüz yüklenmedi"
 
-    def set(self, items: List[Tuple[str, str, Optional[str]]]):
+    def set_from_excel(self, url: str):
         self.clear()
-        for name, price, href in items:
-            self.name_map[name] = (price, href)
+        if not url:
+            return
+        # Google Drive / GitHub Raw vs hepsi için basit indirme
+        headers = {"User-Agent": "Mozilla/5.0 (TelegramBot Excel Loader)"}
+        r = requests.get(url, headers=headers, timeout=60)
+        r.raise_for_status()
+        data = io.BytesIO(r.content)
+        df = pd.read_excel(data, sheet_name="prices")
+
+        # Beklenen kolonlar: product_name, price_tl, aliases, url, notes (diğerleri yoksa sorun değil)
+        cols = {c.lower(): c for c in df.columns}
+        pname_c = cols.get("product_name") or "product_name"
+        price_c = cols.get("price_tl") or "price_tl"
+        alias_c = cols.get("aliases") if "aliases" in cols else None
+        url_c   = cols.get("url") if "url" in cols else None
+
+        for _, row in df.iterrows():
+            name = str(row.get(pname_c) or "").strip()
+            if not name:
+                continue
+            price = row.get(price_c)
+            # Fiyatı biçimle
+            price_fmt = format_price_try(price) if price is not None and str(price).strip() != "" else ""
+            url_val = str(row.get(url_c) or "").strip() if url_c else ""
+            # Kaydet
+            self.name_map[name] = (price_fmt, url_val if url_val else None)
             self.search_index[tr_norm(name)] = name
+            # Aliases
+            if alias_c:
+                aliases = str(row.get(alias_c) or "").strip()
+                if aliases:
+                    for a in [x.strip() for x in aliases.split(",") if x.strip()]:
+                        self.search_index[tr_norm(a)] = name
         self.updated_ts = int(time.time())
+        self.source_info = "Excel"
 
     def size(self) -> int:
         return len(self.name_map)
 
     def last_updated_human(self) -> str:
         if not self.updated_ts:
-            return "Henüz güncellenmedi"
+            return "Henüz yüklenmedi"
         t = time.strftime("%d.%m.%Y %H:%M", time.localtime(self.updated_ts))
         return f"{t} itibarıyla"
 
@@ -156,125 +199,40 @@ class ProductCatalog:
         suggestions = [self.search_index[k] for k in close]
         return None, suggestions
 
-CATALOG = ProductCatalog()
+CATALOG = ExcelCatalog()
 
-# ----------------- Scraper -----------------
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0; +https://core.telegram.org/bots)"
-}
+# -------------- İçerik detay (ürün URL'si) --------------
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"}
 
-def scrape_catalog() -> List[Tuple[str, str, Optional[str]]]:
-    """ Ürün listesini /urun/ sayfasından linkleriyle alır; fiyatı tekil ürün sayfalarından çıkarır.
-        Fiyat bulmada: sayfadaki tüm para adaylarını toplayıp (TL/₺ olsa da olmasa da),
-        0 ve çok küçük değerleri eleyip en büyük mantıklı değeri fiyat kabul eder. """
-    # 1) Liste sayfasını al
+def find_product_url_by_name(name: str) -> Optional[str]:
+    """ Excel'de URL yoksa /urun/ sayfasından benzer isimli linki bulmaya çalış. """
     try:
         r = requests.get(CATALOG_URL, headers=HEADERS, timeout=30)
         r.raise_for_status()
     except Exception:
-        return []
-
+        return None
     soup = BeautifulSoup(r.text, "html.parser")
-
-    # 2) Ürün linklerini & görünen isimleri topla
-    product_links: Dict[str, str] = {}
+    target = tr_norm(name)
+    best_url, best_score = None, 0.0
     for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
         txt = a.get_text(" ", strip=True)
-        if not txt or not href:
+        if not txt: 
             continue
-        if "/urun/" not in href:
-            continue
-        if href.startswith("/"):
-            href = "https://www.beeminternational.com.tr" + href
-        name = txt
-        key = tr_norm(name) or tr_norm(href.rsplit("/", 1)[-1])
-        if key and key not in product_links:
-            product_links[key] = href
-
-    if not product_links:
-        return []
-
-    # 3) Her ürün sayfasına girip isim + fiyat çıkar
-    results: List[Tuple[str, str, Optional[str]]] = []
-    money_pat = re.compile(r"\b(\d{1,3}(?:[\.\s]\d{3})*(?:[\,\.]\d{2})|\d+)\b")  # 984,50 | 1.234,00 | 999
-
-    for key, href in list(product_links.items()):
-        try:
-            pr = requests.get(href, headers=HEADERS, timeout=30)
-            pr.raise_for_status()
-        except Exception:
-            continue
-
-        psoup = BeautifulSoup(pr.text, "html.parser")
-        page_text = " ".join(psoup.get_text(" ", strip=True).split())
-
-        # İsim adayı: h1/h2 başlıklar öncelik
-        name_el = psoup.find(["h1", "h2"])
-        name = (name_el.get_text(" ", strip=True) if name_el else None) or key
-
-        # 3a) Önce yaygın fiyat alanlarından metinleri topla
-        texts: List[str] = []
-        for sel in [".price", ".woocommerce-Price-amount", ".product-price", ".summary .price"]:
-            for el in psoup.select(sel):
-                t = el.get_text(" ", strip=True)
-                if t:
-                    texts.append(t)
-
-        # 3b) Yedek: tüm sayfa metninden de aday topla
-        texts.append(page_text)
-
-        # 3c) Metinlerdeki sayısal para adaylarını topla ve normalize et (TR → float)
-        candidates: List[float] = []
-        for t in texts:
-            for m in money_pat.finditer(t):
-                raw = m.group(1)
-                # normalize: 1.234,56 → 1234.56  |  999 → 999.00
-                x = raw.replace(".", "").replace(" ", "").replace(",", ".")
-                try:
-                    val = float(x)
-                    candidates.append(val)
-                except:
-                    continue
-
-        # 3d) Adayları filtrele: 0 ve çok küçükleri at (ör. sepet 0,00)
-        # (10 TL altını çöplük kabul ediyoruz; istersen bu eşiği 5 yapabiliriz)
-        candidates = [v for v in candidates if v >= 10]
-
-        if not candidates:
-            # Fiyat çıkarılamadıysa bu ürünü atla
-            continue
-
-        # 3e) En büyük mantıklı değeri fiyat kabul et
-        best = max(candidates)
-
-        # 3f) TL biçiminde yaz
-        price_fmt = f"{best:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") + " TL"
-
-        results.append((name, price_fmt, href))
-
-        time.sleep(0.2)  # nazik gecikme
-
-    # Yinelenenleri normalize ederek temizle
-    seen = set()
-    uniq: List[Tuple[str, str, Optional[str]]] = []
-    for n, p, h in results:
-        k = tr_norm(n)
-        if k in seen:
-            continue
-        seen.add(k)
-        uniq.append((n, p, h))
-
-    return uniq
+        score = difflib.SequenceMatcher(None, tr_norm(txt), target).ratio()
+        if score > best_score and "/urun/" in a["href"]:
+            href = a["href"]
+            if href.startswith("/"):
+                href = "https://www.beeminternational.com.tr" + href
+            best_url, best_score = href, score
+    return best_url
 
 def scrape_product_details(url: str) -> str:
-    """ Tekil ürün sayfasından içerik/kullanım özetini çıkarır. """
+    """ Tekil ürün sayfasından içerik/kullanım özeti. """
     try:
         r = requests.get(url, headers=HEADERS, timeout=30)
         r.raise_for_status()
     except Exception:
         return "Ürün detay sayfasına şu an ulaşılamıyor. Lütfen daha sonra tekrar deneyiniz."
-
     soup = BeautifulSoup(r.text, "html.parser")
     full = " ".join(soup.get_text(" ", strip=True).split())
 
@@ -297,7 +255,7 @@ def scrape_product_details(url: str) -> str:
         return (body + "…") if len(full) > 600 else body
     return "Bu ürün için detay metni bulunamadı."
 
-# ----------------- Metinler -----------------
+# -------------- Metinler --------------
 def welcome_text(first_name: Optional[str]) -> str:
     name = first_name or "Değerli Üyemiz"
     return (
@@ -333,7 +291,7 @@ BOT_IDENTITY = (
     "Sorulara **doğru, net ve hızlı** yanıt vermeye çalışırım. Tıbbî tanı/tedavi öneremem; gerekli durumlarda **doktorunuza başvurabilirsiniz**."
 )
 
-# ----------------- FastAPI -----------------
+# -------------- FastAPI --------------
 @app.get("/")
 def home():
     return {"ok": True, "msg": "Bot ayakta. /health de hazır."}
@@ -341,26 +299,33 @@ def home():
 @app.get("/health")
 def health():
     set_bot_commands()
-    return {"status": "healthy", "catalog_size": CATALOG.size(), "updated": CATALOG.last_updated_human()}
+    return {
+        "status": "healthy",
+        "catalog_size": CATALOG.size(),
+        "updated": CATALOG.last_updated_human(),
+        "source": "Excel" if PRICE_SHEET_URL else "—"
+    }
 
-# ----------------- İş mantığı -----------------
+# -------------- Yetki / Yardımcı işlevler --------------
 def is_admin(chat: dict) -> bool:
     uname = (chat.get("username") or "").lower()
     return uname in ADMIN_USERNAMES
 
-def ensure_catalog():
-    if CATALOG.size() == 0:
-        items = scrape_catalog()
-        if items:
-            CATALOG.set(items)
+def ensure_catalog_from_excel():
+    if CATALOG.size() == 0 and PRICE_SHEET_URL:
+        try:
+            CATALOG.set_from_excel(PRICE_SHEET_URL)
+        except Exception:
+            pass
 
 def price_answer(name: str, price: str) -> str:
-    return (
-        f"*{name}* — *{price}*\n\n"
-        "Bee’M kulübüne katılmak veya *indirimli satın almak* istersen, liderlerimize yönlendirebilirim."
+    tail = (
+        "\n\nBee’M kulübüne katılmak veya *indirimli satın almak* istersen, "
+        "liderlerimize yönlendirebilirim."
     )
+    return f"*{name}* — *{price}*{tail}"
 
-# ----------------- Webhook -----------------
+# -------------- Webhook --------------
 @app.post("/webhook")
 async def telegram_webhook(req: Request):
     update = await req.json()
@@ -402,13 +367,16 @@ async def telegram_webhook(req: Request):
         if not query:
             send_message(chat_id, "Örnek kullanım: `/fiyat OZN-Omega 3`")
             return {"ok": True}
-        ensure_catalog()
+        ensure_catalog_from_excel()
         if CATALOG.size() == 0:
-            send_message(chat_id, "Şu an fiyatları çekemiyorum. Lütfen biraz sonra tekrar deneyiniz.")
+            send_message(chat_id, "Şu an fiyat listesini yükleyemedim. Lütfen `/fiyat_guncelle` sonrası tekrar deneyin.")
             return {"ok": True}
         name, suggestions = CATALOG.find(query)
         if name:
             price, _href = CATALOG.name_map.get(name, ("", None))
+            if not price:
+                send_message(chat_id, f"*{name}* için fiyat bulunamadı. Excel'de `price_tl` alanını doldurup `/fiyat_guncelle` yapabilirsiniz.")
+                return {"ok": True}
             send_message(chat_id, price_answer(name, price), reply_markup=leader_inline_keyboard())
         else:
             if suggestions:
@@ -420,23 +388,19 @@ async def telegram_webhook(req: Request):
         return {"ok": True}
 
     if low.startswith("/fiyat_durum"):
-        msg = f"Ürün sayısı: {CATALOG.size()} • Güncelleme: {CATALOG.last_updated_human()}"
+        msg = f"Kaynak: Excel • Ürün sayısı: {CATALOG.size()} • Yükleme: {CATALOG.last_updated_human()}"
         send_message(chat_id, msg)
         return {"ok": True}
 
     if low.startswith("/fiyat_guncelle"):
         # GİZLİ — sadece admin kullanıcı adları
-        if is_admin(chat):
+        if is_admin(chat) and PRICE_SHEET_URL:
             try:
-                items = scrape_catalog()
-                if items:
-                    CATALOG.set(items)
-                    send_message(chat_id, f"Güncellendi ✅ {CATALOG.size()} ürün • {CATALOG.last_updated_human()}")
-                else:
-                    send_message(chat_id, "Liste boş döndü. Site yapısı değişmiş olabilir.")
+                CATALOG.set_from_excel(PRICE_SHEET_URL)
+                send_message(chat_id, f"Güncellendi ✅ {CATALOG.size()} ürün • {CATALOG.last_updated_human()}")
             except Exception:
-                send_message(chat_id, "Güncelleme sırasında bir sorun oluştu.")
-        # admin değilse sessizce yok say
+                send_message(chat_id, "Güncelleme sırasında bir sorun oluştu. PRICE_SHEET_URL geçerli mi?")
+        # admin değilse sessizce geç
         return {"ok": True}
 
     # --- İçerik akışı ---
@@ -445,7 +409,7 @@ async def telegram_webhook(req: Request):
         if not query:
             send_message(chat_id, "Örnek kullanım: `/icerik OZN-Omega 3`")
             return {"ok": True}
-        ensure_catalog()
+        ensure_catalog_from_excel()
         name, suggestions = CATALOG.find(query)
         if not name:
             if suggestions:
@@ -455,6 +419,9 @@ async def telegram_webhook(req: Request):
                 send_message(chat_id, "Bu isimde bir ürün bulamadım.")
             return {"ok": True}
         price, href = CATALOG.name_map.get(name, ("", None))
+        # URL Excel'de yoksa /urun/ sayfasından bulmayı dene
+        if not href:
+            href = find_product_url_by_name(name)
         if not href:
             send_message(chat_id, f"*{name}* için detay bağlantısı bulunamadı.")
             return {"ok": True}
