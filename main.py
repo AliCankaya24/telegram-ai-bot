@@ -1,31 +1,27 @@
 # main.py — Bee’M AI Asistan (JSON içerik + Excel fiyat)
-# Özellikler:
-# - /start: İsimle hoş geldin + butonlu menü
-# - /yardim: Komutlar
-# - /fiyat <ürün>: Excel'den "Ad — Fiyat" + lider butonları
-# - /fiyat_durum: Fiyat kaynağı ve yükleme durumu
-# - /icerik <ürün|alias|ihtiyaç cümlesi>: JSON katalogtan ürün kartı
-# - Serbest metin: Önce ürün eşleşmesi; yoksa satış danışmanı cevabı
-# - “sen kimsin” vb: Bot tanıtım
-#
-# Env: TELEGRAM_BOT_TOKEN (zorunlu), PRICE_SHEET_URL (Excel)
-#      PRODUCTS_SOURCE=JSON, PRODUCTS_JSON_URL=<RAW>
-#      ALI_TELEGRAM, DERYA_TELEGRAM
-#
-# Not: Kişisel veri/log tutulmaz.
+# Notlar:
+# - /health: JSON katalog override + Excel fiyat durumu
+# - /telegram: Telegram webhook (python-telegram-bot v20, async)
+# - /icerik <ürün|alias|ihtiyaç> : JSON katalogtan ürün kartı
+# - /fiyat <ürün> : Excel PRICE_SHEET_URL'den fiyat
+# - Tüm ürün/fiyat cevaplarında Ali & Derya butonları
+# - Kişisel veri/log tutulmaz
 
-import os, re, io, json, time, urllib.request, asyncio
-from typing import Any, Dict, List, Optional
+import os, re, io, json, asyncio, urllib.request
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
-# ---- 3. taraflar ----
-import pandas as pd  # Excel fiyat için (requirements: pandas, openpyxl)
+import pandas as pd  # Excel fiyat için (pandas + openpyxl gerektirir)
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ================== YARDIMCILAR ==================
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, ApplicationBuilder, CommandHandler,
+    MessageHandler, ContextTypes, filters
+)
+
+# ================== ORTAK ARAÇLAR ==================
 
 def _get_env(*names: str, default: str = "") -> str:
     """ENV değerlerini sırayla dener; ilk dolu olanı döndürür."""
@@ -37,21 +33,22 @@ def _get_env(*names: str, default: str = "") -> str:
 
 def _norm(s: str) -> str:
     """Türkçe normalize + boşluk sadeleştirme."""
-    if not s: return ""
+    if not s:
+        return ""
     s = s.lower().strip()
     repl = {
         "ı": "i", "İ": "i", "ş": "s", "Ş": "s", "ğ": "g", "Ğ": "g",
         "ç": "c", "Ç": "c", "ö": "o", "Ö": "o", "ü": "u", "Ü": "u",
         "’": "'", "”": '"', "“": '"'
     }
-    for a,b in repl.items():
-        s = s.replace(a,b)
+    for a, b in repl.items():
+        s = s.replace(a, b)
     return " ".join(s.split())
 
 def human_now() -> str:
     return datetime.now().strftime("%d.%m.%Y %H:%M")
 
-# ================== JSON KATALOG OVERRIDE ==================
+# ================== JSON KATALOG (OVERRIDE) ==================
 
 CATALOG_SOURCE_OVERRIDE: Optional[str] = None   # "JSON" / None
 CATALOG_DATA_OVERRIDE: Dict[str, Any] = {}
@@ -63,35 +60,41 @@ def _fetch_json(url: str) -> Dict[str, Any]:
     return json.loads(body)
 
 def try_load_json_catalog_override() -> None:
-    """ENV JSON istiyorsa kataloğu yükle ve alias indeksini kur."""
+    """
+    ENV JSON istiyorsa kataloğu RAW URL'den yükler
+    ve alias indeksini (ürün adı + aliaslar) kurar.
+    """
     global CATALOG_SOURCE_OVERRIDE, CATALOG_DATA_OVERRIDE, ALIAS_INDEX
+
     source = _get_env("PRODUCTS_SOURCE", "CATALOG_SOURCE").upper()
     if source != "JSON":
         return
+
     url = _get_env("PRODUCTS_JSON_URL", "CATALOG_JSON_URL", "CATALOG_URL")
     if not url:
         return
+
     try:
         data = _fetch_json(url)
         products = data.get("products", [])
         if isinstance(products, list) and products:
             CATALOG_SOURCE_OVERRIDE = "JSON"
             CATALOG_DATA_OVERRIDE = data
-            # alias indeksini kur
+
+            # Alias indeksi
             ALIAS_INDEX = []
             for p in products:
-                name = p.get("product_name","").strip()
+                name = (p.get("product_name") or "").strip()
                 aliases = p.get("aliases", []) or []
                 candidates = set(aliases + ([name] if name else []))
                 for a in candidates:
                     ALIAS_INDEX.append((_norm(a), p))
-            # uzun alias'lar önce
             ALIAS_INDEX.sort(key=lambda x: len(x[0]), reverse=True)
-            print(f"[catalog-override] Loaded {len(products)} products from JSON.")
+            print(f"[catalog] JSON loaded: {len(products)} products.")
         else:
-            print("[catalog-override] JSON reached but no products found.")
+            print("[catalog] JSON reached but no products list.")
     except Exception as e:
-        print(f"[catalog-override] JSON load failed: {e}")
+        print(f"[catalog] JSON load failed: {e}")
 
 def get_catalog_size_override() -> int:
     if CATALOG_SOURCE_OVERRIDE == "JSON":
@@ -105,7 +108,9 @@ def health_patch(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload = dict(payload or {})
         payload["source"] = "JSON"
         payload["catalog_size"] = get_catalog_size_override()
-        payload["updated"] = CATALOG_DATA_OVERRIDE.get("metadata", {}).get("updated", payload.get("updated") or "JSON yüklendi")
+        payload["updated"] = CATALOG_DATA_OVERRIDE.get("metadata", {}).get(
+            "updated", payload.get("updated") or "JSON yüklendi"
+        )
     return payload
 
 def find_product_by_query(text: str) -> Optional[Dict[str, Any]]:
@@ -118,17 +123,17 @@ def find_product_by_query(text: str) -> Optional[Dict[str, Any]]:
             return prod
     return None
 
-# Uygulama yüklenirken JSON’u dener
+# App yüklenirken JSON’u dene
 try_load_json_catalog_override()
 
 # ================== EXCEL FİYAT KAYNAĞI ==================
 
-PRICE_SHEET_URL = _get_env("PRICE_SHEET_URL")  # GitHub raw .xlsx olabilir
+PRICE_SHEET_URL = _get_env("PRICE_SHEET_URL")  # GitHub RAW .xlsx olabilir
 _price_cache: Dict[str, float] = {}
 _price_cache_updated: str = "Henüz yüklenmedi"
 
 def load_prices_from_excel(force: bool = False) -> None:
-    """Excel URL’den fiyatları yükle (Ad, Fiyat) sütunlarını okur."""
+    """Excel URL'den (Ad, Fiyat) sütunlarını okur, cache'e alır."""
     global _price_cache, _price_cache_updated
     if not PRICE_SHEET_URL:
         _price_cache = {}
@@ -136,11 +141,12 @@ def load_prices_from_excel(force: bool = False) -> None:
         return
     if _price_cache and not force:
         return
+
     try:
-        # Excel indir
         data = urllib.request.urlopen(PRICE_SHEET_URL, timeout=30).read()
         df = pd.read_excel(io.BytesIO(data))
-        # Beklenen sütun adları: Ad, Fiyat (senin şablon öyleydi)
+
+        # Sütun adlarını normalize ederek bul
         name_col = None
         price_col = None
         for c in df.columns:
@@ -151,6 +157,7 @@ def load_prices_from_excel(force: bool = False) -> None:
                 price_col = c
         if name_col is None or price_col is None:
             raise ValueError("Excel sütunları bulunamadı (Ad/Fiyat).")
+
         cache = {}
         for _, row in df.iterrows():
             name = str(row[name_col]).strip()
@@ -161,74 +168,83 @@ def load_prices_from_excel(force: bool = False) -> None:
             except Exception:
                 continue
             cache[_norm(name)] = price_val
+
         _price_cache = cache
         _price_cache_updated = human_now()
-        print(f"[prices] Loaded {len(_price_cache)} items from Excel at { _price_cache_updated }")
+        print(f"[prices] Loaded {len(_price_cache)} items at {_price_cache_updated}")
     except Exception as e:
         print(f"[prices] load failed: {e}")
         _price_cache = {}
         _price_cache_updated = "Yüklenemedi"
 
 def find_price(name_query: str) -> Optional[float]:
-    """Ad benzerliğine göre fiyat bulur."""
+    """Ad benzerliğine göre basit fiyat eşleşmesi."""
     if not _price_cache:
         load_prices_from_excel()
     if not _price_cache:
         return None
+
     q = _norm(name_query)
+
     # 1) Doğrudan
     if q in _price_cache:
         return _price_cache[q]
+
     # 2) İçerme
     for k, v in _price_cache.items():
         if k in q or q in k:
             return v
-    # 3) Basit yakın eşleşme
-    best = None
-    best_ratio = 0.0
-    for k,v in _price_cache.items():
-        # çok basit jaccard benzeri
-        inter = len(set(k.split()) & set(q.split()))
-        ratio = inter / max(1, len(set(k.split())))
-        if ratio > best_ratio:
-            best_ratio = ratio
-            best = v
-    return best
+
+    # 3) Basit yakın eşleşme (kelime kesişim oranı)
+    best_val = None
+    best_score = 0.0
+    qset = set(q.split())
+    for k, v in _price_cache.items():
+        kset = set(k.split())
+        inter = len(qset & kset)
+        score = inter / max(1, len(kset))
+        if score > best_score:
+            best_score = score
+            best_val = v
+    return best_val
 
 # ================== TELEGRAM BİLEŞENLERİ ==================
 
 BOT_TOKEN = _get_env("TELEGRAM_BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN env eksik!")
+
 ALI_TELE = _get_env("ALI_TELEGRAM", default="@ali_cankaya").lstrip("@")
 DERYA_TELE = _get_env("DERYA_TELEGRAM", default="@deryakaratasates").lstrip("@")
 
 def build_leader_buttons() -> InlineKeyboardMarkup:
+    """Mesaj altına Ali & Derya butonları."""
     buttons = [[
         InlineKeyboardButton("Ali Çankaya", url=f"https://t.me/{ALI_TELE}"),
-        InlineKeyboardButton("Derya Karataş Ateş", url=f"https://t.me/{DERYA_TELE}"),
+        InlineKeyboardButton("Derya Karataş Ateş", url=f"https://t.me/{DERYA_TELE}")
     ]]
     return InlineKeyboardMarkup(buttons)
 
 def product_card_text(p: Dict[str, Any]) -> str:
-    name = p.get("product_name","BEE’M Ürünü")
-    desc = p.get("description","")
-    ingredients = p.get("ingredients",[])
-    usage = p.get("usage","")
+    """Ürün kartı metni (Stil C kapanış dahil)."""
+    name = p.get("product_name", "BEE’M Ürünü")
+    desc = p.get("description", "")
+    ingredients = p.get("ingredients", [])
+    usage = p.get("usage", "")
+    med = p.get("medical_note", "")
+
     lines = []
     lines.append(f"✨ <b>{name}</b>")
     if desc:
         lines.append(desc)
-    # İçerik listesi uzun ise kısaltmadan madde madde göster
     if ingredients:
         lines.append("\n<b>Öne Çıkan İçerikler:</b>")
         for it in ingredients[:10]:
             lines.append(f"• {it}")
     if usage:
         lines.append(f"\n<b>Kullanım:</b> {usage}")
-    # Tıbbi uyarı
-    med = p.get("medical_note","")
     if med:
         lines.append(f"\n<i>{med}</i>")
-    # Kapanış stili: C (güçlü)
     lines.append("\n<i>Daha net sonuç için düzenli kullanım önerilir. Sipariş veya danışmanlık için iletişime geçebilirsin.</i>")
     return "\n".join(lines)
 
@@ -270,14 +286,16 @@ async def cmd_fiyat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=build_leader_buttons()
         )
         return
+    # Basit TL yazımı (tam sayı gibi)
+    price_txt = f"{int(price):,}".replace(",", ".")
     await update.message.reply_text(
-        f"{q.strip()} — <b>{int(price):,} TL</b>".replace(",", "."),
+        f"{q.strip()} — <b>{price_txt} TL</b>",
         parse_mode="HTML",
         reply_markup=build_leader_buttons()
     )
 
 async def cmd_fiyat_durum(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    load_prices_from_excel()  # gerekirse yükler
+    load_prices_from_excel()  # lazy
     src = "Excel" if PRICE_SHEET_URL else "—"
     msg = (
         f"<b>Fiyat Kaynağı:</b> {src}\n"
@@ -307,7 +325,7 @@ async def cmd_icerik(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(product_card_text(prod), parse_mode="HTML", reply_markup=build_leader_buttons())
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Serbest metin: önce ürün eşleşmesi; yoksa satış asistanı cevabı."""
+    """Serbest metin: önce ürün eşleşmesi; yoksa satış danışmanı cevabı."""
     text = update.message.text or ""
     # 1) ÜRÜN ÖNCELİĞİ
     if CATALOG_SOURCE_OVERRIDE == "JSON":
@@ -330,11 +348,9 @@ async def on_whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, reply_markup=build_leader_buttons())
 
-# ================== TELEGRAM APP & WEBHOOK ==================
+# ================== TELEGRAM APP (v20) ==================
 
-if not BOT_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN env eksik!")
-
+BOT_TOKEN = _get_env("TELEGRAM_BOT_TOKEN")
 application: Application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 # Komutlar
@@ -368,7 +384,9 @@ app = FastAPI()
 
 @app.on_event("startup")
 async def on_startup():
-    # Excel fiyatları lazy yüklenir; burada komutları set edelim
+    # PTB uygulamasını webhook modunda kullanacağız:
+    # initialize bir kez yeterli; process_update ile çalışır.
+    await application.initialize()
     asyncio.create_task(_set_bot_commands())
 
 @app.get("/")
@@ -377,7 +395,8 @@ def root_ok():
 
 @app.get("/health")
 def health():
-    load_prices_from_excel()  # lazy yük
+    # Excel fiyat cache'i lazy yüklensin:
+    load_prices_from_excel()
     payload = {
         "status": "healthy",
         "catalog_size": get_catalog_size_override(),
@@ -392,6 +411,6 @@ async def telegram_webhook(req: Request):
     """Telegram webhook endpoint."""
     data = await req.json()
     update = Update.de_json(data, application.bot)
-    await application.initialize()
+    # initialize zaten startup'ta yapıldı; burada direkt process_update:
     await application.process_update(update)
     return JSONResponse({"ok": True})
