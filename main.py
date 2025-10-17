@@ -364,11 +364,13 @@ def health():
     }
     # JSON override aktifse düzelt
     payload = health_patch(payload)
+
     # JSON override aktifse 'updated' alanını JSON metadata'dan doldur
-if CATALOG_SOURCE_OVERRIDE == "JSON":
-    payload["updated"] = CATALOG_DATA_OVERRIDE.get("metadata", {}).get("updated", "JSON yüklendi")
+    if CATALOG_SOURCE_OVERRIDE == "JSON":
+        payload["updated"] = CATALOG_DATA_OVERRIDE.get("metadata", {}).get("updated", "JSON yüklendi")
 
     return payload
+
 
 # -------------- Yetki / Yardımcı işlevler --------------
 def is_admin(chat: dict) -> bool:
