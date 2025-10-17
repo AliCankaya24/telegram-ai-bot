@@ -1,0 +1,326 @@
+{
+  "metadata": {
+    "source": "Curated",
+    "version": "1.0",
+    "updated": "17.10.2025 15:19",
+    "closing_style": "C",
+    "leaders": {
+      "ali_telegram": "@ali_cankaya",
+      "derya_telegram": "@deryakaratasates"
+    }
+  },
+  "products": [
+    {
+      "product_name": "BEE’M OZN-Omega 3 Kapsül",
+      "aliases": [
+        "omega3",
+        "balık yağı",
+        "ozn omega",
+        "omega 3 kapsül",
+        "omega"
+      ],
+      "category": [
+        "Bağışıklık",
+        "Genel Sağlık"
+      ],
+      "description": "Kuzey sularından elde edilen saf balık yağı içeriğiyle kalp, beyin ve bağışıklık sistemini desteklemek amacıyla özel olarak formüle edilmiştir. Yüksek EPA ve DHA değeriyle hücre zar yapısını destekler, metabolik fonksiyonları destekler.",
+      "ingredients": [
+        "Balık Yağı: 1000 mg",
+        "Omega-3 toplamı: 780 mg (EPA: 360 mg, DHA: 260 mg)",
+        "İyot: 150 µg",
+        "Vitamin D3: 25 µg"
+      ],
+      "usage": "11 yaş ve üzeri yetişkinler için günde 1 kapsül TOK karnına; bir bardak suyla.",
+      "medical_note": "Takviye edici gıdadır; ilaç değildir. Hamilelik/emzirme/hastalık veya ilaç kullanımı durumlarında doktora danışınız."
+    },
+    {
+      "product_name": "BEE’M Profesyonel Nemlendirici",
+      "aliases": [
+        "nemlendirici",
+        "yüz kremi",
+        "cilt kremi",
+        "krem",
+        "bakım kremi",
+        "yanık kremi"
+      ],
+      "category": [
+        "Cilt Bakımı"
+      ],
+      "description": "Su bazlı, hızlı emilen formülüyle cildi yağlandırmadan derinlemesine nemlendirir, cilt bariyerini güçlendirir ve parlaklık kazandırır.",
+      "ingredients": [
+        "Su bazlı hafif formül",
+        "Vitamin ve bitkisel özler",
+        "Paraben içermez"
+      ],
+      "usage": "Temiz cilde günde 2 kez (sabah–akşam) dairesel masajla uygulayın. Serum ile birlikte etkisi artar.",
+      "medical_note": "Haricen kullanım içindir. Göz çevresinden uzak tutunuz."
+    },
+    {
+      "product_name": "BEE’M Profesyonel Serum",
+      "aliases": [
+        "serum",
+        "cilt serumu",
+        "bakım serumu",
+        "leke serumu"
+      ],
+      "category": [
+        "Cilt Bakımı"
+      ],
+      "description": "Yoğun nem ve cilt yenileme desteği sağlar; ince çizgi görünümünü azaltmaya ve cildi aydınlık, canlı göstermeye yardımcı olur.",
+      "ingredients": [
+        "Yenileyici aktifler",
+        "Yoğun nemlendirme teknolojisi"
+      ],
+      "usage": "Temiz cilde günde 2 kez 2–3 damla; ardından nemlendirici. Uygulama sonrası 20–30 dk ekran/mavi ışıktan uzak durunuz.",
+      "medical_note": "Haricen kullanım içindir. Göz ile temasından kaçınınız."
+    },
+    {
+      "product_name": "BEE’M Vitamin Kompleksi / Enerji İçeceği",
+      "aliases": [
+        "enerji içeceği",
+        "vitamin tozu",
+        "enerji takviyesi",
+        "multivitamin",
+        "içecek vitamin"
+      ],
+      "category": [
+        "Enerji",
+        "Bağışıklık"
+      ],
+      "description": "Gün boyu enerji ve bağışıklık desteği için pratik takviye içeceği. Enerji metabolizmasını desteklemeye yardımcı formül.",
+      "ingredients": [
+        "Multi-vitamin/mineral kompleksi"
+      ],
+      "usage": "Günde 2–3 saşe; su veya soda ile karıştırarak gün içinde tüketin. İhtiyaca göre ayarlanabilir.",
+      "medical_note": "Takviye edici gıdadır; ilaç değildir."
+    },
+    {
+      "product_name": "BEE’M Plus Kolajen Kapsül",
+      "aliases": [
+        "kolajen",
+        "collagen",
+        "eklem takviyesi",
+        "cilt elastikiyeti"
+      ],
+      "category": [
+        "Cilt Bakımı",
+        "Eklem"
+      ],
+      "description": "Tip 1–2–3 kolajen içeren formülüyle cilt elastikiyeti, eklem ve bağ dokusuna destek verir; saç ve tırnakları güçlendirmeye yardımcı olur.",
+      "ingredients": [
+        "Tip 1 Kolajen",
+        "Tip 2 Kolajen",
+        "Tip 3 Kolajen"
+      ],
+      "usage": "Yetişkinler için günde 1 kapsül; tok karnına.",
+      "medical_note": "Takviye edici gıdadır; ilaç değildir."
+    },
+    {
+      "product_name": "BEE’M OZN 6X Klasik Kahve",
+      "aliases": [
+        "kahve",
+        "ganoderma kahve",
+        "enerji kahvesi",
+        "ozon kahve",
+        "6x kahve",
+        "reishi mantarı",
+        "inülin",
+        "alfalfa",
+        "keçiboynuzu",
+        "hindiba",
+        "ganoderma"
+      ],
+      "category": [
+        "Enerji",
+        "Sindirim"
+      ],
+      "description": "Bitkisel içeriklerle zenginleştirilmiş fonksiyonel kahve; enerji, odak ve metabolizma desteği.",
+      "ingredients": [
+        "Kahve",
+        "İnülin",
+        "Alfalfa",
+        "Keçiboynuzu",
+        "Hindiba",
+        "Reishi (Ganoderma)"
+      ],
+      "usage": "Günde 1–2 fincan; sıcak suyla hazırlayın. Mümkünse şekersiz tüketin.",
+      "medical_note": "Takviye amaçlıdır; ilaç değildir."
+    },
+    {
+      "product_name": "BEE’M Masaj Kremi",
+      "aliases": [
+        "masaj kremi",
+        "ağrı kremi",
+        "kas kremi",
+        "spor kremi",
+        "rahatlatıcı krem",
+        "ozon krem",
+        "ozonlu krem",
+        "gümüş iyon krem",
+        "silver krem",
+        "eklem kremi",
+        "bel boyun kremi",
+        "mantar kremi"
+      ],
+      "category": [
+        "Topikal Bakım"
+      ],
+      "description": "Kas ve eklem bölgelerindeki gerginlik ve yorgunluğu rahatlatmaya yardımcı, hızlı emilen topikal krem.",
+      "ingredients": [
+        "(Özet) Bitkisel karışım",
+        "Ozon desteği",
+        "Gümüş iyon"
+      ],
+      "usage": "İhtiyaç duyulan bölgeye günde 2–3 kez masajla uygulayın; sonrası sıcak tutmak etkiyi artırır.",
+      "medical_note": "Haricen kullanım içindir; göz ve hassas bölgelerden uzak tutun."
+    },
+    {
+      "product_name": "BEE’M Profesyonel Peeling",
+      "aliases": [
+        "peeling",
+        "yüz peelingi",
+        "cilt yenileyici",
+        "siyah nokta peeling"
+      ],
+      "category": [
+        "Cilt Bakımı"
+      ],
+      "description": "Ölü deriyi nazikçe arındırır, gözenekleri temizlemeye ve cildi pürüzsüz göstermeye yardımcı olur.",
+      "ingredients": [
+        "Nazik arındırıcı kompleks"
+      ],
+      "usage": "Temiz ve nemli cilde haftada 2–3 kez; masajla uygulayın, ılık suyla durulayın.",
+      "medical_note": "Haricen kullanım içindir; hassas ciltler sıklığı azaltabilir."
+    },
+    {
+      "product_name": "BEE’M Profesyonel Maske",
+      "aliases": [
+        "yüz maskesi",
+        "cilt maskesi",
+        "bakım maskesi",
+        "yenileyici maske"
+      ],
+      "category": [
+        "Cilt Bakımı"
+      ],
+      "description": "Derinlemesine arındırma ve yağ dengesi desteği; gözenek görünümünü azaltmaya yardımcıdır.",
+      "ingredients": [
+        "Arındırıcı/dengeleyici kompleks"
+      ],
+      "usage": "Temiz cilde haftada 2–3 kez ince tabaka; 20–25 dk bekletin, ılık suyla durulayın. Peeling sonrası etki artar.",
+      "medical_note": "Haricen kullanım içindir."
+    },
+    {
+      "product_name": "BEE’M Profesyonel Tonik",
+      "aliases": [
+        "tonik",
+        "yüz toniği",
+        "cilt toniği",
+        "gözenek sıkılaştırıcı tonik"
+      ],
+      "category": [
+        "Cilt Bakımı"
+      ],
+      "description": "Cildi dengeler, gözenek görünümünü azaltmaya yardımcı olur; bakımın hazırlayıcı adımıdır.",
+      "ingredients": [
+        "Dengeleyici tonik bileşenleri"
+      ],
+      "usage": "Günde 2 kez pamukla tüm yüze/boyna; durulama gerektirmez. Serum ve nemlendirici öncesi.",
+      "medical_note": "Haricen kullanım içindir."
+    },
+    {
+      "product_name": "BEE’M Ozonlu Gençlik Sabunu",
+      "aliases": [
+        "ozon sabunu",
+        "gençlik sabunu",
+        "cilt sabunu",
+        "doğal sabun",
+        "ozonlu sabun"
+      ],
+      "category": [
+        "Temizlik"
+      ],
+      "description": "Derinlemesine temizlik ve yağ dengesi; ozon desteği ile ferahlık ve canlılık hissi.",
+      "ingredients": [
+        "Ozon destekli formül"
+      ],
+      "usage": "Islak cilde köpürtülerek; günde 2 kez yüz ve vücut için. Ardından nemlendirici önerilir.",
+      "medical_note": "Haricen kullanım içindir."
+    },
+    {
+      "product_name": "BEE’M Ballı Güzellik Sabunu",
+      "aliases": [
+        "ballı sabun",
+        "doğal sabun",
+        "cilt sabunu",
+        "güzellik sabunu"
+      ],
+      "category": [
+        "Temizlik"
+      ],
+      "description": "Doğal bal desteğiyle nazik temizlik; cildi besleyip yumuşatmaya yardımcı olur.",
+      "ingredients": [
+        "Doğal bal"
+      ],
+      "usage": "Günde 2 kez; yüz/vücut kullanımı. Ardından nemlendirici önerilir.",
+      "medical_note": "Haricen kullanım içindir."
+    },
+    {
+      "product_name": "BEE’M Profesyonel Güneş Kremi",
+      "aliases": [
+        "güneş kremi",
+        "spf krem",
+        "uv koruma kremi",
+        "güneş losyonu"
+      ],
+      "category": [
+        "Koruma",
+        "Cilt Bakımı"
+      ],
+      "description": "50+ SPF seviyesinde, su bazlı ve hızlı emilen formül; UVA/UVB ve çevresel etkenlere karşı günlük/yıl boyu koruma. Beyaz iz bırakmaz; leke oluşumuna karşı koruyucu destek. Yalnızca yazın değil, yılın her günü gündüz/gece düzenli kullanım önerilir.",
+      "ingredients": [
+        "Geniş spektrumlu filtre sistemi",
+        "Su bazlı taşıyıcı"
+      ],
+      "usage": "Günde 2 kez; güneşe çıkmadan 15–20 dk önce. Gün içinde terleme/yüzme sonrası yenileyin.",
+      "medical_note": "Haricen kullanım içindir."
+    },
+    {
+      "product_name": "BEE’M Antiseptik İçerikli Ağız Spreyi",
+      "aliases": [
+        "ağız spreyi",
+        "antiseptik sprey",
+        "nefes tazeleyici",
+        "ağız bakımı spreyi"
+      ],
+      "category": [
+        "Ağız Bakımı"
+      ],
+      "description": "Ağız hijyenini ve ferahlığı destekleyen, antiseptik etkili pratik sprey.",
+      "ingredients": [
+        "Antiseptik içerik kombinasyonu"
+      ],
+      "usage": "İhtiyaç halinde ağız içine 1–2 püskürtme; gün içinde tekrarlanabilir.",
+      "medical_note": "Yutulması önerilmez."
+    },
+    {
+      "product_name": "BEE’M Bee’Dent Profesyonel Diş Macunu",
+      "aliases": [
+        "diş macunu",
+        "beyazlatıcı macun",
+        "doğal diş macunu",
+        "bee dent"
+      ],
+      "category": [
+        "Ağız Bakımı"
+      ],
+      "description": "Diş ve diş eti sağlığını destekleyen, mineye nazik temizlik; plak/tartar oluşumunu azaltmaya yardımcı.",
+      "ingredients": [
+        "Nazik aşındırıcılar",
+        "Bakım destek içerikleri"
+      ],
+      "usage": "Günde en az 2 kez fırçalayın. Ağız spreyi ile birlikte kullanımı önerilir.",
+      "medical_note": "Yutulması önerilmez; 6 yaş altı için uzman tavsiyesi."
+    }
+  ]
+}
