@@ -1,8 +1,9 @@
-# main.py — Bee’M AI Asistan (JSON içerik + Excel fiyat) — FINAL
+# main.py — Bee’M AI Asistan (JSON içerik + Excel fiyat) — FINAL PATCH
 # - /health: JSON katalog durumu
 # - /telegram: Telegram webhook (python-telegram-bot v20, async)
 # - /icerik <ürün|alias|ihtiyaç>: JSON katalogtan ürün kartı (alias öncelikli)
-# - /fiyat <ürün>: Excel PRICE_SHEET_URL'den fiyat (esnek başlık/fiyat okuma)
+# - /fiyat <ürün>: Excel PRICE_SHEET_URL'den fiyat (esnek başlık/fiyat okuma + doğru ondalık parse)
+# - /yardım ve /yardim destekli; bilinmeyen komut yakalanır
 # - Tüm ürün/fiyat cevaplarında Ali & Derya butonları
 # - Kişisel veri/log tutulmaz
 
@@ -52,6 +53,24 @@ def _get_effective_text(update: Update) -> str:
     if not m:
         return ""
     return (m.text or m.caption or "").strip()
+
+# --- fiyat metni parser: 984.50 / 1.234,56 / 1,234.56 / 2.025 TL -> float ---
+def _parse_price_text(raw: str) -> float:
+    s = (raw or "").strip().replace("TL", "").replace("₺", "").replace("\u00A0", "").replace(" ", "")
+    # 1) Avrupa biçimi: 1.234,56
+    if re.fullmatch(r"\d{1,3}(\.\d{3})+,\d{1,2}", s):
+        s = s.replace(".", "").replace(",", ".")
+        return float(s)
+    # 2) US biçimi: 1,234.56
+    if re.fullmatch(r"\d{1,3}(,\d{3})+\.\d{1,2}", s):
+        s = s.replace(",", "")
+        return float(s)
+    # 3) Sadece virgül ondalık: 984,50
+    if "," in s and "." not in s:
+        s = s.replace(",", ".")
+        return float(s)
+    # 4) Sadece nokta ondalık: 984.50 (dokunma)
+    return float(s)
 
 # ================== JSON KATALOG OVERRIDE ==================
 
@@ -182,11 +201,8 @@ def load_prices_from_excel(force: bool = False) -> None:
                 continue
             # fiyatı sayıya çevir (metinden arındır)
             raw = str(row[price_col]).strip()
-            raw = raw.replace("TL", "").replace("₺", "").replace(" ", "")
-            # 1.000,50 / 1,000.50 gibi durumlara karşı:
-            raw = raw.replace(".", "").replace(",", ".")
             try:
-                price_val = float(raw)
+                price_val = _parse_price_text(raw)
             except Exception:
                 try:
                     price_val = float(row[price_col])
@@ -282,10 +298,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not m: return
     u = update.effective_user
     full_name = (u.full_name or u.first_name or "Misafir").strip()
+    # Onaylı Hoş Geldin metni
     msg = (
-        f"Merhaba, aramıza hoş geldin <b>{full_name}</b>! 🌿✨\n"
-        "Bee’M International ailesine katıldığın için teşekkür ederiz.\n\n"
-        "Komutlar: /yardim — /icerik — /fiyat — /fiyat_durum"
+        f"Merhaba, aramıza hoş geldin! <b>{full_name}</b> 🌿✨\n"
+        "Bee’m International ailesine katıldığın için teşekkür ederiz.\n"
+        "Bugün sağlığın ve yaşam kaliten için çok değerli bir adım attın ve biz de bu yolculukta yanındayız.\n\n"
+        "Aldığın ürünler; bilimsel içeriği, yüksek saflık oranı ve IFOS – GMP – ISO gibi uluslararası kalite sertifikalarıyla güvence altındadır. "
+        "Ürünlerini düzenli kullandığında hem enerjinin yükseldiğini hem yaşam kalitenin arttığını hissedeceksin.\n\n"
+        "📌 <b>Destek Hattı | Ürün Kullanım Rehberi</b>\n"
+        "Ürünlerinle ilgili kullanım desteği, soru-cevap, tavsiye ya da takip isteyen herkes için buradayız.\n"
+        "Herhangi bir sorunda bu mesajı yanıtlaman yeterli 😊\n\n"
+        "Unutma: <b>Sağlık yolculuğu birlikte daha güçlü</b> 🍀\n"
+        "Tekrar aramıza hoş geldin!\n"
+        "<b>Ali ÇANKAYA - Derya ATEŞ</b>"
     )
     await m.reply_text(msg, parse_mode="HTML", reply_markup=build_leader_buttons())
 
@@ -317,7 +342,7 @@ async def cmd_fiyat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=build_leader_buttons()
         )
         return
-    price_txt = f"{int(price):,}".replace(",", ".")
+    price_txt = f"{price:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")  # 1.234,56 biçimi
     await m.reply_text(
         f"{q.strip()} — <b>{price_txt} TL</b>",
         parse_mode="HTML",
@@ -381,6 +406,11 @@ async def on_whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=build_leader_buttons()
     )
 
+async def on_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    m = update.effective_message
+    if not m: return
+    await m.reply_text("Bilinmeyen komut. Yardım için /yardim yazabilirsin.", reply_markup=build_leader_buttons())
+
 # ================== TELEGRAM APP (v20) ==================
 
 BOT_TOKEN = _get_env("TELEGRAM_BOT_TOKEN")
@@ -393,8 +423,17 @@ application.add_handler(CommandHandler("fiyat", cmd_fiyat))
 application.add_handler(CommandHandler("fiyat_durum", cmd_fiyat_durum))
 application.add_handler(CommandHandler("icerik", cmd_icerik))
 
-# “sen kimsin” yakalayıcı
+# "/yardım" Unicode'lu komut metni ve "/yardim" alias'i (slash'lı yazım için)
+application.add_handler(MessageHandler(
+    filters.Regex(re.compile(r"^/(yardım|yardim)(?:@[\w_]+)?$", re.I)),
+    cmd_yardim
+))
+
+# “sen kimsin” yakalayıcı (serbest metin)
 application.add_handler(MessageHandler(filters.Regex(re.compile(r"\b(kimsin|sen kimsin|kim\s?sin)\b", re.I)), on_whoami))
+
+# Bilinmeyen komut yakalayıcı (slash'lı ama tanınmayanlar)
+application.add_handler(MessageHandler(filters.COMMAND, on_unknown_command))
 
 # Serbest metin
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
