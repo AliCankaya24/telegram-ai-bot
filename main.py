@@ -13,6 +13,63 @@
 # Not: Kişisel veri/log tutulmaz.
 
 import os, time, re, difflib, io, requests
+# ==== FORCE JSON CATALOG OVERRIDE (drop-in hotfix) ==========================
+import os, json, urllib.request
+from typing import Any, Dict, List
+
+CATALOG_SOURCE_OVERRIDE = None      # "JSON" ya da None
+CATALOG_DATA_OVERRIDE: Dict[str, Any] = {}
+
+def _get_env(*names: str, default: str = "") -> str:
+    for n in names:
+        v = os.getenv(n, "").strip()
+        if v:
+            return v
+    return default
+
+def _fetch_json(url: str) -> Dict[str, Any]:
+    with urllib.request.urlopen(url, timeout=20) as resp:
+        body = resp.read().decode("utf-8")
+    return json.loads(body)
+
+def try_load_json_catalog_override() -> None:
+    global CATALOG_SOURCE_OVERRIDE, CATALOG_DATA_OVERRIDE
+    source = _get_env("PRODUCTS_SOURCE", "CATALOG_SOURCE").upper()
+    if source != "JSON":
+        return
+    url = _get_env("PRODUCTS_JSON_URL", "CATALOG_JSON_URL", "CATALOG_URL")
+    if not url:
+        return
+    try:
+        data = _fetch_json(url)
+        products = data.get("products", [])
+        if isinstance(products, list) and products:
+            CATALOG_SOURCE_OVERRIDE = "JSON"
+            CATALOG_DATA_OVERRIDE = data
+            print(f"[catalog-override] Loaded {len(products)} products from JSON.")
+        else:
+            print("[catalog-override] JSON reached but no products found.")
+    except Exception as e:
+        print(f"[catalog-override] JSON load failed: {e}")
+
+# Uygulama import edilir edilmez bir kere dene:
+try_load_json_catalog_override()
+
+def get_catalog_size_override() -> int:
+    if CATALOG_SOURCE_OVERRIDE == "JSON":
+        prods = CATALOG_DATA_OVERRIDE.get("products", [])
+        return len(prods) if isinstance(prods, list) else 0
+    return 0
+
+def health_patch(payload: Dict[str, Any]) -> Dict[str, Any]:
+    # Var olan /health yanıtını JSON override aktifse düzeltir.
+    if CATALOG_SOURCE_OVERRIDE == "JSON":
+        payload = dict(payload or {})
+        payload["source"] = "JSON"
+        payload["catalog_size"] = get_catalog_size_override()
+    return payload
+# ==== /FORCE JSON CATALOG OVERRIDE =========================================
+
 from typing import Dict, Tuple, Optional, List
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request
@@ -299,12 +356,15 @@ def home():
 @app.get("/health")
 def health():
     set_bot_commands()
-    return {
+    payload = {
         "status": "healthy",
         "catalog_size": CATALOG.size(),
         "updated": CATALOG.last_updated_human(),
         "source": "Excel" if PRICE_SHEET_URL else "—"
     }
+    # JSON override aktifse düzelt
+    payload = health_patch(payload)
+    return payload
 
 # -------------- Yetki / Yardımcı işlevler --------------
 def is_admin(chat: dict) -> bool:
