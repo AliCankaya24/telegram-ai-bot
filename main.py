@@ -1,31 +1,61 @@
-# main.py — Bee’M AI Asistan (Excel fiyatlı final)
+# main.py — Bee’M AI Asistan (JSON içerik + Excel fiyat)
 # Özellikler:
-# - /start, /menu: Kişiye isimle hoş geldin + butonlu menü
-# - /fiyat <ürün>: Excel'den "Ad — Fiyat" + lider yönlendirme
-# - /fiyat_guncelle: Excel'i URL'den tekrar okur (GİZLİ — sadece admin)
-# - /fiyat_durum: Son yükleme ve ürün sayısı
-# - /icerik <ürün>: Ürünün detay linkinden içerik/kullanım özeti (Excel'de "url" doluysa onu, yoksa /urun/ sayfasından bulmaya çalışır)
-# - “sen kimsin?” → mix tanıtım
-# - /kargo, /indirim, /destek: kısa akışlar
+# - /start: İsimle hoş geldin + butonlu menü
+# - /yardim: Komutlar
+# - /fiyat <ürün>: Excel'den "Ad — Fiyat" + lider butonları
+# - /fiyat_durum: Fiyat kaynağı ve yükleme durumu
+# - /icerik <ürün|alias|ihtiyaç cümlesi>: JSON katalogtan ürün kartı
+# - Serbest metin: Önce ürün eşleşmesi; yoksa satış danışmanı cevabı
+# - “sen kimsin” vb: Bot tanıtım
 #
-# Env: TELEGRAM_BOT_TOKEN, GROQ_API_KEY, PRICE_SHEET_URL
-# Opsiyonel: ADMIN_USERNAMES (virgüllü liste; varsayılan: ali_cankaya, deryakaratasates)
+# Env: TELEGRAM_BOT_TOKEN (zorunlu), PRICE_SHEET_URL (Excel)
+#      PRODUCTS_SOURCE=JSON, PRODUCTS_JSON_URL=<RAW>
+#      ALI_TELEGRAM, DERYA_TELEGRAM
+#
 # Not: Kişisel veri/log tutulmaz.
 
-import os, time, re, difflib, io, requests
-# ==== FORCE JSON CATALOG OVERRIDE (drop-in hotfix) ==========================
-import os, json, urllib.request
-from typing import Any, Dict, List
+import os, re, io, json, time, urllib.request, asyncio
+from typing import Any, Dict, List, Optional
+from datetime import datetime
 
-CATALOG_SOURCE_OVERRIDE = None      # "JSON" ya da None
-CATALOG_DATA_OVERRIDE: Dict[str, Any] = {}
+# ---- 3. taraflar ----
+import pandas as pd  # Excel fiyat için (requirements: pandas, openpyxl)
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, PlainTextResponse
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+
+# ================== YARDIMCILAR ==================
 
 def _get_env(*names: str, default: str = "") -> str:
+    """ENV değerlerini sırayla dener; ilk dolu olanı döndürür."""
     for n in names:
         v = os.getenv(n, "").strip()
         if v:
             return v
     return default
+
+def _norm(s: str) -> str:
+    """Türkçe normalize + boşluk sadeleştirme."""
+    if not s: return ""
+    s = s.lower().strip()
+    repl = {
+        "ı": "i", "İ": "i", "ş": "s", "Ş": "s", "ğ": "g", "Ğ": "g",
+        "ç": "c", "Ç": "c", "ö": "o", "Ö": "o", "ü": "u", "Ü": "u",
+        "’": "'", "”": '"', "“": '"'
+    }
+    for a,b in repl.items():
+        s = s.replace(a,b)
+    return " ".join(s.split())
+
+def human_now() -> str:
+    return datetime.now().strftime("%d.%m.%Y %H:%M")
+
+# ================== JSON KATALOG OVERRIDE ==================
+
+CATALOG_SOURCE_OVERRIDE: Optional[str] = None   # "JSON" / None
+CATALOG_DATA_OVERRIDE: Dict[str, Any] = {}
+ALIAS_INDEX: List[tuple] = []  # (alias_norm, product_dict)
 
 def _fetch_json(url: str) -> Dict[str, Any]:
     with urllib.request.urlopen(url, timeout=20) as resp:
@@ -33,7 +63,8 @@ def _fetch_json(url: str) -> Dict[str, Any]:
     return json.loads(body)
 
 def try_load_json_catalog_override() -> None:
-    global CATALOG_SOURCE_OVERRIDE, CATALOG_DATA_OVERRIDE
+    """ENV JSON istiyorsa kataloğu yükle ve alias indeksini kur."""
+    global CATALOG_SOURCE_OVERRIDE, CATALOG_DATA_OVERRIDE, ALIAS_INDEX
     source = _get_env("PRODUCTS_SOURCE", "CATALOG_SOURCE").upper()
     if source != "JSON":
         return
@@ -46,14 +77,21 @@ def try_load_json_catalog_override() -> None:
         if isinstance(products, list) and products:
             CATALOG_SOURCE_OVERRIDE = "JSON"
             CATALOG_DATA_OVERRIDE = data
+            # alias indeksini kur
+            ALIAS_INDEX = []
+            for p in products:
+                name = p.get("product_name","").strip()
+                aliases = p.get("aliases", []) or []
+                candidates = set(aliases + ([name] if name else []))
+                for a in candidates:
+                    ALIAS_INDEX.append((_norm(a), p))
+            # uzun alias'lar önce
+            ALIAS_INDEX.sort(key=lambda x: len(x[0]), reverse=True)
             print(f"[catalog-override] Loaded {len(products)} products from JSON.")
         else:
             print("[catalog-override] JSON reached but no products found.")
     except Exception as e:
         print(f"[catalog-override] JSON load failed: {e}")
-
-# Uygulama import edilir edilmez bir kere dene:
-try_load_json_catalog_override()
 
 def get_catalog_size_override() -> int:
     if CATALOG_SOURCE_OVERRIDE == "JSON":
@@ -62,451 +100,298 @@ def get_catalog_size_override() -> int:
     return 0
 
 def health_patch(payload: Dict[str, Any]) -> Dict[str, Any]:
-    # Var olan /health yanıtını JSON override aktifse düzeltir.
+    """JSON override aktifse /health yanıtını düzeltir."""
     if CATALOG_SOURCE_OVERRIDE == "JSON":
         payload = dict(payload or {})
         payload["source"] = "JSON"
         payload["catalog_size"] = get_catalog_size_override()
+        payload["updated"] = CATALOG_DATA_OVERRIDE.get("metadata", {}).get("updated", payload.get("updated") or "JSON yüklendi")
     return payload
-# ==== /FORCE JSON CATALOG OVERRIDE =========================================
 
-from typing import Dict, Tuple, Optional, List
-from bs4 import BeautifulSoup
-from fastapi import FastAPI, Request
-import pandas as pd
+def find_product_by_query(text: str) -> Optional[Dict[str, Any]]:
+    """Kullanıcı metninden ürün eşleştir (alias + ürün adı)."""
+    q = _norm(text)
+    if not q:
+        return None
+    for alias_norm, prod in ALIAS_INDEX:
+        if alias_norm and alias_norm in q:
+            return prod
+    return None
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-PRICE_SHEET_URL = os.getenv("PRICE_SHEET_URL", "")
-TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+# Uygulama yüklenirken JSON’u dener
+try_load_json_catalog_override()
 
-# Admin kullanıcı adları (küçük harf, @ yok)
-ADMIN_USERNAMES = set(u.strip().lower() for u in os.getenv(
-    "ADMIN_USERNAMES",
-    "ali_cankaya, deryakaratasates"
-).split(","))
+# ================== EXCEL FİYAT KAYNAĞI ==================
 
-# Ürün linklerini bulmak için fallback sayfası
-CATALOG_URL = "https://www.beeminternational.com.tr/urun/"
+PRICE_SHEET_URL = _get_env("PRICE_SHEET_URL")  # GitHub raw .xlsx olabilir
+_price_cache: Dict[str, float] = {}
+_price_cache_updated: str = "Henüz yüklenmedi"
+
+def load_prices_from_excel(force: bool = False) -> None:
+    """Excel URL’den fiyatları yükle (Ad, Fiyat) sütunlarını okur."""
+    global _price_cache, _price_cache_updated
+    if not PRICE_SHEET_URL:
+        _price_cache = {}
+        _price_cache_updated = "Kaynak yok"
+        return
+    if _price_cache and not force:
+        return
+    try:
+        # Excel indir
+        data = urllib.request.urlopen(PRICE_SHEET_URL, timeout=30).read()
+        df = pd.read_excel(io.BytesIO(data))
+        # Beklenen sütun adları: Ad, Fiyat (senin şablon öyleydi)
+        name_col = None
+        price_col = None
+        for c in df.columns:
+            cn = _norm(str(c))
+            if name_col is None and ("ad" in cn or "urun" in cn):
+                name_col = c
+            if price_col is None and ("fiyat" in cn or "price" in cn):
+                price_col = c
+        if name_col is None or price_col is None:
+            raise ValueError("Excel sütunları bulunamadı (Ad/Fiyat).")
+        cache = {}
+        for _, row in df.iterrows():
+            name = str(row[name_col]).strip()
+            if not name or name.lower() == "nan":
+                continue
+            try:
+                price_val = float(row[price_col])
+            except Exception:
+                continue
+            cache[_norm(name)] = price_val
+        _price_cache = cache
+        _price_cache_updated = human_now()
+        print(f"[prices] Loaded {len(_price_cache)} items from Excel at { _price_cache_updated }")
+    except Exception as e:
+        print(f"[prices] load failed: {e}")
+        _price_cache = {}
+        _price_cache_updated = "Yüklenemedi"
+
+def find_price(name_query: str) -> Optional[float]:
+    """Ad benzerliğine göre fiyat bulur."""
+    if not _price_cache:
+        load_prices_from_excel()
+    if not _price_cache:
+        return None
+    q = _norm(name_query)
+    # 1) Doğrudan
+    if q in _price_cache:
+        return _price_cache[q]
+    # 2) İçerme
+    for k, v in _price_cache.items():
+        if k in q or q in k:
+            return v
+    # 3) Basit yakın eşleşme
+    best = None
+    best_ratio = 0.0
+    for k,v in _price_cache.items():
+        # çok basit jaccard benzeri
+        inter = len(set(k.split()) & set(q.split()))
+        ratio = inter / max(1, len(set(k.split())))
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best = v
+    return best
+
+# ================== TELEGRAM BİLEŞENLERİ ==================
+
+BOT_TOKEN = _get_env("TELEGRAM_BOT_TOKEN")
+ALI_TELE = _get_env("ALI_TELEGRAM", default="@ali_cankaya").lstrip("@")
+DERYA_TELE = _get_env("DERYA_TELEGRAM", default="@deryakaratasates").lstrip("@")
+
+def build_leader_buttons() -> InlineKeyboardMarkup:
+    buttons = [[
+        InlineKeyboardButton("Ali Çankaya", url=f"https://t.me/{ALI_TELE}"),
+        InlineKeyboardButton("Derya Karataş Ateş", url=f"https://t.me/{DERYA_TELE}"),
+    ]]
+    return InlineKeyboardMarkup(buttons)
+
+def product_card_text(p: Dict[str, Any]) -> str:
+    name = p.get("product_name","BEE’M Ürünü")
+    desc = p.get("description","")
+    ingredients = p.get("ingredients",[])
+    usage = p.get("usage","")
+    lines = []
+    lines.append(f"✨ <b>{name}</b>")
+    if desc:
+        lines.append(desc)
+    # İçerik listesi uzun ise kısaltmadan madde madde göster
+    if ingredients:
+        lines.append("\n<b>Öne Çıkan İçerikler:</b>")
+        for it in ingredients[:10]:
+            lines.append(f"• {it}")
+    if usage:
+        lines.append(f"\n<b>Kullanım:</b> {usage}")
+    # Tıbbi uyarı
+    med = p.get("medical_note","")
+    if med:
+        lines.append(f"\n<i>{med}</i>")
+    # Kapanış stili: C (güçlü)
+    lines.append("\n<i>Daha net sonuç için düzenli kullanım önerilir. Sipariş veya danışmanlık için iletişime geçebilirsin.</i>")
+    return "\n".join(lines)
+
+# ================== TELEGRAM HANDLER’LAR ==================
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    full_name = (user.full_name or user.first_name or "Misafir").strip()
+    msg = (
+        f"Merhaba, aramıza hoş geldin <b>{full_name}</b>! 🌿✨\n"
+        "Bee’M International ailesine katıldığın için teşekkür ederiz.\n\n"
+        "Ürünlerin bilimsel içeriği ve uluslararası kalite standartlarıyla güvence altındadır. "
+        "Soru ve destek için yazabilirsin.\n\n"
+        "Komutlar: /yardim — /icerik — /fiyat — /fiyat_durum"
+    )
+    await update.message.reply_text(msg, parse_mode="HTML", reply_markup=build_leader_buttons())
+
+async def cmd_yardim(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "<b>Komutlar</b>\n"
+        "• /icerik <ürün|ihtiyaç> — Ürün bilgi kartı\n"
+        "• /fiyat <ürün> — Excel’den fiyat\n"
+        "• /fiyat_durum — Fiyat kaynağı ve yükleme zamanı\n"
+        "• /yardim — Bu menü\n\n"
+        "Not: Ürün dışı sağlık sorularında tıbbi tavsiye veremem; doktorunuza danışın."
+    )
+    await update.message.reply_text(msg, parse_mode="HTML", reply_markup=build_leader_buttons())
+
+async def cmd_fiyat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = " ".join(context.args) if context.args else ""
+    if not q:
+        await update.message.reply_text("Kullanım: /fiyat <ürün adı>", reply_markup=build_leader_buttons())
+        return
+    price = find_price(q)
+    if price is None:
+        await update.message.reply_text(
+            "Üzgünüm, bu isimde bir ürün bulamadım veya fiyatı tanımlı değil. "
+            "Lütfen ürün adını kontrol edip tekrar deneyiniz.",
+            reply_markup=build_leader_buttons()
+        )
+        return
+    await update.message.reply_text(
+        f"{q.strip()} — <b>{int(price):,} TL</b>".replace(",", "."),
+        parse_mode="HTML",
+        reply_markup=build_leader_buttons()
+    )
+
+async def cmd_fiyat_durum(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    load_prices_from_excel()  # gerekirse yükler
+    src = "Excel" if PRICE_SHEET_URL else "—"
+    msg = (
+        f"<b>Fiyat Kaynağı:</b> {src}\n"
+        f"<b>Son Yükleme:</b> {_price_cache_updated}\n"
+        f"<b>Kayıtlı Ürün Sayısı:</b> {len(_price_cache)}"
+    )
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+async def cmd_icerik(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = " ".join(context.args) if context.args else ""
+    if not q:
+        await update.message.reply_text("Kullanım: /icerik <ürün|alias|ihtiyaç>", reply_markup=build_leader_buttons())
+        return
+    if CATALOG_SOURCE_OVERRIDE != "JSON":
+        await update.message.reply_text(
+            "Ürün kataloğu şu anda aktif değil. Lütfen daha sonra tekrar deneyiniz.",
+            reply_markup=build_leader_buttons()
+        )
+        return
+    prod = find_product_by_query(q)
+    if not prod:
+        await update.message.reply_text(
+            "Bu isimde ürün bulamadım. Ürün adını kontrol edip yeniden deneyebilirsin.",
+            reply_markup=build_leader_buttons()
+        )
+        return
+    await update.message.reply_text(product_card_text(prod), parse_mode="HTML", reply_markup=build_leader_buttons())
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Serbest metin: önce ürün eşleşmesi; yoksa satış asistanı cevabı."""
+    text = update.message.text or ""
+    # 1) ÜRÜN ÖNCELİĞİ
+    if CATALOG_SOURCE_OVERRIDE == "JSON":
+        prod = find_product_by_query(text)
+        if prod:
+            await update.message.reply_text(product_card_text(prod), parse_mode="HTML", reply_markup=build_leader_buttons())
+            return
+    # 2) Basit satış danışmanı cevabı (tıbbi iddia yok)
+    reply = (
+        "İhtiyacını anladım. Sana uygun ürünü birlikte netleştirebiliriz. "
+        "Kısa bir mesajla neye odaklandığını yaz: örn. ‘cilt temizliği’, ‘enerji’, ‘eklem desteği’.\n\n"
+        "Detaylı sorular ve sipariş için butonlardan bize ulaşabilirsin."
+    )
+    await update.message.reply_text(reply, reply_markup=build_leader_buttons())
+
+async def on_whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "Ben Bee’M AI Asistanıyım. Ürün bilgisi, kullanım önerisi ve satış yönlendirmesi için yanındayım. "
+        "Sağlık konularında tıbbi tavsiye veremem; doktorunuza danışınız."
+    )
+    await update.message.reply_text(msg, reply_markup=build_leader_buttons())
+
+# ================== TELEGRAM APP & WEBHOOK ==================
+
+if not BOT_TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN env eksik!")
+
+application: Application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+# Komutlar
+application.add_handler(CommandHandler("start", cmd_start))
+application.add_handler(CommandHandler("yardim", cmd_yardim))
+application.add_handler(CommandHandler("fiyat", cmd_fiyat))
+application.add_handler(CommandHandler("fiyat_durum", cmd_fiyat_durum))
+application.add_handler(CommandHandler("icerik", cmd_icerik))
+
+# “sen kimsin” yakalayıcı
+application.add_handler(MessageHandler(filters.Regex(re.compile(r"\b(kimsin|sen kimsin|kim\s?sin)\b", re.I)), on_whoami))
+
+# Serbest metin
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+
+async def _set_bot_commands():
+    try:
+        await application.bot.set_my_commands([
+            ("start", "Hoş geldin mesajı"),
+            ("yardim", "Komutlar menüsü"),
+            ("icerik", "Ürün bilgi kartı"),
+            ("fiyat", "Excel’den fiyat"),
+            ("fiyat_durum", "Fiyat kaynağı ve durum"),
+        ])
+    except Exception as e:
+        print(f"[botcmd] set_my_commands failed: {e}")
+
+# ================== FASTAPI APP ==================
 
 app = FastAPI()
 
-# -------------- Yardımcılar --------------
-def send_message(chat_id: int, text: str, reply_markup: dict | None = None):
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    try:
-        requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=20)
-    except Exception:
-        pass
+@app.on_event("startup")
+async def on_startup():
+    # Excel fiyatları lazy yüklenir; burada komutları set edelim
+    asyncio.create_task(_set_bot_commands())
 
-def ask_groq(prompt: str) -> str:
-    try:
-        r = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}",
-                     "Content-Type": "application/json"},
-            json={
-                "model": "llama-3.1-8b-instant",
-                "messages": [
-                    {"role": "system", "content": (
-                        "Profesyonel satış danışmanı gibi konuş. Net, sıcak ve ikna edici ol. "
-                        "Tıbbi tavsiye verme; genel bilgi ver ve kullanıcıya 'doktorunuza "
-                        "başvurabilirsiniz' de. Satın alma yönlendirmesinde liderlerden "
-                        "İNDİRİM LİNKİ isteyebileceğini hatırlat. Kısa, anlaşılır, Türkçe yanıt ver."
-                    )},
-                    {"role": "user", "content": prompt}
-                ]
-            },
-            timeout=30
-        )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"].strip()
-    except Exception:
-        return "Şu an yanıt veremiyorum, lütfen tekrar dener misiniz?"
-
-def main_menu_keyboard() -> dict:
-    return {
-        "keyboard": [
-            [{"text": "💰 Fiyat"}, {"text": "📦 Kargo"}],
-            [{"text": "🔗 İndirim"}, {"text": "🆘 Destek"}],
-        ],
-        "resize_keyboard": True,
-        "one_time_keyboard": False
-    }
-
-def leader_inline_keyboard() -> dict:
-    return {
-        "inline_keyboard": [[
-            {"text": "İletişim - Ali Çankaya", "url": "https://t.me/ali_cankaya"},
-            {"text": "İletişim - Derya Karataş Ateş", "url": "https://t.me/deryakaratasates"}
-        ]]
-    }
-
-def set_bot_commands():
-    cmds = [
-        {"command": "start", "description": "Başlat ve menüyü göster"},
-        {"command": "menu", "description": "Menüyü tekrar göster"},
-        {"command": "fiyat", "description": "Fiyat sorgula: /fiyat <ürün>"},
-        # /fiyat_guncelle gizli: listeye eklemiyoruz
-        {"command": "fiyat_durum", "description": "Fiyat listesi bilgisi"},
-        {"command": "icerik", "description": "Ürün içeriği: /icerik <ürün>"},
-        {"command": "kargo", "description": "Kargo & teslimat bilgisi"},
-        {"command": "indirim", "description": "İndirim linki yönlendirmesi"},
-        {"command": "destek", "description": "Canlı destek/iletişim"},
-    ]
-    try:
-        requests.post(f"{TELEGRAM_API}/setMyCommands",
-                      json={"commands": cmds}, timeout=20)
-    except Exception:
-        pass
-
-def tr_norm(s: str) -> str:
-    s = s.lower().strip()
-    table = str.maketrans("çğıöşüâêîû’'", "cgiosuaeiu  ")
-    s = s.translate(table)
-    s = re.sub(r"[^a-z0-9]+", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-def format_price_try(val) -> str:
-    # val sayı ise: 984.5 → "984,50 TL"; metinse parse etmeye çalış
-    if isinstance(val, (int, float)):
-        num = float(val)
-    else:
-        raw = str(val).strip()
-        raw = raw.replace(".", "").replace(",", ".")
-        try:
-            num = float(raw)
-        except:
-            return str(val)
-    return f"{num:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") + " TL"
-
-# -------------- Katalog (Excel'den) --------------
-class ExcelCatalog:
-    def __init__(self):
-        # name_map: orijinal_ad -> (fiyat_fmt, url)
-        self.name_map: Dict[str, Tuple[str, Optional[str]]] = {}
-        # search_index: normalize -> orijinal_ad
-        self.search_index: Dict[str, str] = {}
-        self.updated_ts: Optional[int] = None
-        self.source_info: str = "Henüz yüklenmedi"
-
-    def clear(self):
-        self.name_map.clear()
-        self.search_index.clear()
-        self.updated_ts = None
-        self.source_info = "Henüz yüklenmedi"
-
-    def set_from_excel(self, url: str):
-        self.clear()
-        if not url:
-            return
-        # Google Drive / GitHub Raw vs hepsi için basit indirme
-        headers = {"User-Agent": "Mozilla/5.0 (TelegramBot Excel Loader)"}
-        r = requests.get(url, headers=headers, timeout=60)
-        r.raise_for_status()
-        data = io.BytesIO(r.content)
-        df = pd.read_excel(data, sheet_name="prices")
-
-        # Beklenen kolonlar: product_name, price_tl, aliases, url, notes (diğerleri yoksa sorun değil)
-        cols = {c.lower(): c for c in df.columns}
-        pname_c = cols.get("product_name") or "product_name"
-        price_c = cols.get("price_tl") or "price_tl"
-        alias_c = cols.get("aliases") if "aliases" in cols else None
-        url_c   = cols.get("url") if "url" in cols else None
-
-        for _, row in df.iterrows():
-            name = str(row.get(pname_c) or "").strip()
-            if not name:
-                continue
-            price = row.get(price_c)
-            # Fiyatı biçimle
-            price_fmt = format_price_try(price) if price is not None and str(price).strip() != "" else ""
-            url_val = str(row.get(url_c) or "").strip() if url_c else ""
-            # Kaydet
-            self.name_map[name] = (price_fmt, url_val if url_val else None)
-            self.search_index[tr_norm(name)] = name
-            # Aliases
-            if alias_c:
-                aliases = str(row.get(alias_c) or "").strip()
-                if aliases:
-                    for a in [x.strip() for x in aliases.split(",") if x.strip()]:
-                        self.search_index[tr_norm(a)] = name
-        self.updated_ts = int(time.time())
-        self.source_info = "Excel"
-
-    def size(self) -> int:
-        return len(self.name_map)
-
-    def last_updated_human(self) -> str:
-        if not self.updated_ts:
-            return "Henüz yüklenmedi"
-        t = time.strftime("%d.%m.%Y %H:%M", time.localtime(self.updated_ts))
-        return f"{t} itibarıyla"
-
-    def find(self, query: str) -> Tuple[Optional[str], List[str]]:
-        if not query:
-            return None, []
-        qn = tr_norm(query)
-        if qn in self.search_index:
-            return self.search_index[qn], []
-        keys = list(self.search_index.keys())
-        close = difflib.get_close_matches(qn, keys, n=3, cutoff=0.6)
-        suggestions = [self.search_index[k] for k in close]
-        return None, suggestions
-
-CATALOG = ExcelCatalog()
-
-# -------------- İçerik detay (ürün URL'si) --------------
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"}
-
-def find_product_url_by_name(name: str) -> Optional[str]:
-    """ Excel'de URL yoksa /urun/ sayfasından benzer isimli linki bulmaya çalış. """
-    try:
-        r = requests.get(CATALOG_URL, headers=HEADERS, timeout=30)
-        r.raise_for_status()
-    except Exception:
-        return None
-    soup = BeautifulSoup(r.text, "html.parser")
-    target = tr_norm(name)
-    best_url, best_score = None, 0.0
-    for a in soup.find_all("a", href=True):
-        txt = a.get_text(" ", strip=True)
-        if not txt: 
-            continue
-        score = difflib.SequenceMatcher(None, tr_norm(txt), target).ratio()
-        if score > best_score and "/urun/" in a["href"]:
-            href = a["href"]
-            if href.startswith("/"):
-                href = "https://www.beeminternational.com.tr" + href
-            best_url, best_score = href, score
-    return best_url
-
-def scrape_product_details(url: str) -> str:
-    """ Tekil ürün sayfasından içerik/kullanım özeti. """
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        r.raise_for_status()
-    except Exception:
-        return "Ürün detay sayfasına şu an ulaşılamıyor. Lütfen daha sonra tekrar deneyiniz."
-    soup = BeautifulSoup(r.text, "html.parser")
-    full = " ".join(soup.get_text(" ", strip=True).split())
-
-    patterns = [
-        r"içindekiler[:\s]+(.{50,500})",
-        r"kullanım\s*tal[ıi]mat[ıi](:|\s)+(.{50,500})",
-        r"nasıl\s*kullan[ıi]l[ıi]r[:\s]+(.{50,500})",
-        r"içerik[:\s]+(.{50,500})",
-        r"özellikler[:\s]+(.{50,500})",
-    ]
-    for pat in patterns:
-        m = re.search(pat, full, flags=re.I)
-        if m:
-            chunk = m.group(1) if m.lastindex == 1 else m.group(2)
-            chunk = chunk.strip()
-            return (chunk[:400] + "…") if len(chunk) > 400 else chunk
-
-    body = full[:600]
-    if body:
-        return (body + "…") if len(full) > 600 else body
-    return "Bu ürün için detay metni bulunamadı."
-
-# -------------- Metinler --------------
-def welcome_text(first_name: Optional[str]) -> str:
-    name = first_name or "Değerli Üyemiz"
-    return (
-        f"Merhaba, aramıza hoş geldin! ({name}) 🌿✨\n"
-        "Bee’m International ailesine katıldığın için teşekkür ederiz.\n"
-        "Bugün sağlığın ve yaşam kaliten için çok değerli bir adım attın ve biz de bu yolculukta yanındayız.\n\n"
-        "Aldığın ürünler; bilimsel içeriği, yüksek saflık oranı ve IFOS – GMP – ISO gibi uluslararası kalite "
-        "sertifikalarıyla güvence altındadır. Ürünlerini düzenli kullandığında hem enerjinin yükseldiğini hem "
-        "yaşam kalitenin arttığını hissedeceksin.\n\n"
-        "📌 *Destek Hattı | Ürün Kullanım Rehberi*\n"
-        "Ürünlerinle ilgili kullanım desteği, soru-cevap, tavsiye ya da takip isteyen herkes için buradayız.\n"
-        "Herhangi bir sorunda bu mesajı yanıtlaman yeterli 😊\n\n"
-        "Unutma: Sağlık yolculuğu birlikte daha güçlü 🍀\n"
-        "Tekrar aramıza hoş geldin!\n"
-        "**Ali ÇANKAYA - Derya ATEŞ**"
-    )
-
-KARGO_INFO = (
-    "📦 *Kargo & Teslimat Bilgisi*\n"
-    "• Siparişler genellikle **1–3 iş günü** içinde teslim edilir.\n"
-    "• Kargonuz gelmediyse Bee’M International iletişim hattını arayabilirsiniz: "
-    "**0 530 393 23 36**\n"
-    "• Kargo takip numaranız varsa yazın, kontrol edelim.\n\n"
-    "_Not: Ürünlerle ilgili genel bilgi verebilirim; tıbbî tavsiye veremem. "
-    "Kişisel sağlık durumunuz için doktorunuza başvurabilirsiniz._"
-)
-
-BOT_IDENTITY = (
-    "Ben **Bee’M AI Asistan** 🤝\n"
-    "Bee’M International ürünleri hakkında **içerik**, **fiyat**, **kullanım desteği** ve **bilgi yönlendirmesi** sağlayan "
-    "yapay zekâ tabanlı bir yardımcım. **Gerçek bir ekibe bağlı çalışıyorum**: *Ali Çankaya & Derya Karataş Ateş* liderliğinde "
-    "destek veriyorum.\n\n"
-    "Sorulara **doğru, net ve hızlı** yanıt vermeye çalışırım. Tıbbî tanı/tedavi öneremem; gerekli durumlarda **doktorunuza başvurabilirsiniz**."
-)
-
-# -------------- FastAPI --------------
 @app.get("/")
-def home():
-    return {"ok": True, "msg": "Bot ayakta. /health de hazır."}
+def root_ok():
+    return PlainTextResponse("OK")
 
 @app.get("/health")
 def health():
-    set_bot_commands()
+    load_prices_from_excel()  # lazy yük
     payload = {
         "status": "healthy",
-        "catalog_size": CATALOG.size(),
-        "updated": CATALOG.last_updated_human(),
-        "source": "Excel" if PRICE_SHEET_URL else "—"
+        "catalog_size": get_catalog_size_override(),
+        "updated": CATALOG_DATA_OVERRIDE.get("metadata", {}).get("updated", "Henüz yüklenmedi"),
+        "source": "JSON" if CATALOG_SOURCE_OVERRIDE == "JSON" else ("Excel" if PRICE_SHEET_URL else "—"),
     }
-    # JSON override aktifse düzelt
     payload = health_patch(payload)
+    return JSONResponse(payload)
 
-    # JSON override aktifse 'updated' alanını JSON metadata'dan doldur
-    if CATALOG_SOURCE_OVERRIDE == "JSON":
-        payload["updated"] = CATALOG_DATA_OVERRIDE.get("metadata", {}).get("updated", "JSON yüklendi")
-
-    return payload
-
-
-# -------------- Yetki / Yardımcı işlevler --------------
-def is_admin(chat: dict) -> bool:
-    uname = (chat.get("username") or "").lower()
-    return uname in ADMIN_USERNAMES
-
-def ensure_catalog_from_excel():
-    if CATALOG.size() == 0 and PRICE_SHEET_URL:
-        try:
-            CATALOG.set_from_excel(PRICE_SHEET_URL)
-        except Exception:
-            pass
-
-def price_answer(name: str, price: str) -> str:
-    tail = (
-        "\n\nBee’M kulübüne katılmak veya *indirimli satın almak* istersen, "
-        "liderlerimize yönlendirebilirim."
-    )
-    return f"*{name}* — *{price}*{tail}"
-
-# -------------- Webhook --------------
-@app.post("/webhook")
+@app.post("/telegram")
 async def telegram_webhook(req: Request):
-    update = await req.json()
-    message = update.get("message") or {}
-    chat = message.get("chat") or {}
-    chat_id = chat.get("id")
-    text = (message.get("text") or "").strip()
-    low = text.lower()
-    first_name = chat.get("first_name")
-
-    if not chat_id:
-        return {"ok": True}
-
-    # --- Menü / Karşılama ---
-    if low.startswith("/start") or low.startswith("/menu") or low == "menu":
-        send_message(chat_id, welcome_text(first_name), reply_markup=main_menu_keyboard())
-        return {"ok": True}
-
-    # --- Kargo / İndirim / Destek ---
-    if low.startswith("/kargo") or low == "📦 kargo":
-        send_message(chat_id, KARGO_INFO)
-        return {"ok": True}
-
-    if low.startswith("/indirim") or low == "🔗 indirim":
-        send_message(chat_id, "İndirimli satın alma için liderlerimizle iletişime geçebilirsiniz:", reply_markup=leader_inline_keyboard())
-        return {"ok": True}
-
-    if low.startswith("/destek") or low == "🆘 destek":
-        send_message(chat_id, "Canlı destek için aşağıdaki bağlantılardan bize ulaşabilirsiniz.", reply_markup=leader_inline_keyboard())
-        return {"ok": True}
-
-    # --- Fiyat akışı ---
-    if low == "💰 fiyat":
-        send_message(chat_id, "Lütfen ürün adını şu şekilde gönderin:\n`/fiyat <ürün adı>`")
-        return {"ok": True}
-
-    if low.startswith("/fiyat"):
-        query = text[len("/fiyat"):].strip()
-        if not query:
-            send_message(chat_id, "Örnek kullanım: `/fiyat OZN-Omega 3`")
-            return {"ok": True}
-        ensure_catalog_from_excel()
-        if CATALOG.size() == 0:
-            send_message(chat_id, "Şu an fiyat listesini yükleyemedim. Lütfen `/fiyat_guncelle` sonrası tekrar deneyin.")
-            return {"ok": True}
-        name, suggestions = CATALOG.find(query)
-        if name:
-            price, _href = CATALOG.name_map.get(name, ("", None))
-            if not price:
-                send_message(chat_id, f"*{name}* için fiyat bulunamadı. Excel'de `price_tl` alanını doldurup `/fiyat_guncelle` yapabilirsiniz.")
-                return {"ok": True}
-            send_message(chat_id, price_answer(name, price), reply_markup=leader_inline_keyboard())
-        else:
-            if suggestions:
-                sug = "\n".join(f"• {s}" for s in suggestions)
-                send_message(chat_id, f"Bu isimde ürün bulamadım. Yakın sonuçlar:\n{sug}\n\n"
-                                      "İstersen ürün adını düzelterek yeniden deneyebilirsin.")
-            else:
-                send_message(chat_id, "Bu isimde bir ürün bulamadım. Lütfen ürün adını kontrol edip tekrar dener misiniz?")
-        return {"ok": True}
-
-    if low.startswith("/fiyat_durum"):
-        msg = f"Kaynak: Excel • Ürün sayısı: {CATALOG.size()} • Yükleme: {CATALOG.last_updated_human()}"
-        send_message(chat_id, msg)
-        return {"ok": True}
-
-    if low.startswith("/fiyat_guncelle"):
-        # GİZLİ — sadece admin kullanıcı adları
-        if is_admin(chat) and PRICE_SHEET_URL:
-            try:
-                CATALOG.set_from_excel(PRICE_SHEET_URL)
-                send_message(chat_id, f"Güncellendi ✅ {CATALOG.size()} ürün • {CATALOG.last_updated_human()}")
-            except Exception:
-                send_message(chat_id, "Güncelleme sırasında bir sorun oluştu. PRICE_SHEET_URL geçerli mi?")
-        # admin değilse sessizce geç
-        return {"ok": True}
-
-    # --- İçerik akışı ---
-    if low.startswith("/icerik"):
-        query = text[len("/icerik"):].strip()
-        if not query:
-            send_message(chat_id, "Örnek kullanım: `/icerik OZN-Omega 3`")
-            return {"ok": True}
-        ensure_catalog_from_excel()
-        name, suggestions = CATALOG.find(query)
-        if not name:
-            if suggestions:
-                sug = "\n".join(f"• {s}" for s in suggestions)
-                send_message(chat_id, f"Tam olarak bulamadım. Yakın ürünler:\n{sug}")
-            else:
-                send_message(chat_id, "Bu isimde bir ürün bulamadım.")
-            return {"ok": True}
-        price, href = CATALOG.name_map.get(name, ("", None))
-        # URL Excel'de yoksa /urun/ sayfasından bulmayı dene
-        if not href:
-            href = find_product_url_by_name(name)
-        if not href:
-            send_message(chat_id, f"*{name}* için detay bağlantısı bulunamadı.")
-            return {"ok": True}
-        detail = scrape_product_details(href)
-        send_message(chat_id,
-            f"*{name}* — içerik/kullanım özeti:\n{detail}\n\n"
-            "_Genel bilgilendirme amaçlıdır; tıbbî tavsiye veremem. "
-            "Kişisel durumunuz için doktorunuza başvurabilirsiniz._",
-            reply_markup=leader_inline_keyboard()
-        )
-        return {"ok": True}
-
-    # --- “Sen kimsin?” doğal sorusu ---
-    if "sen kimsin" in low or "kimsin" in low or low.startswith("/kim"):
-        send_message(chat_id, BOT_IDENTITY)
-        return {"ok": True}
-
-    # --- Diğer her şey: Akıllı sohbet ---
-    if text:
-        reply = ask_groq(text)
-        send_message(chat_id, reply)
-    return {"ok": True}
+    """Telegram webhook endpoint."""
+    data = await req.json()
+    update = Update.de_json(data, application.bot)
+    await application.initialize()
+    await application.process_update(update)
+    return JSONResponse({"ok": True})
